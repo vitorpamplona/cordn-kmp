@@ -46,6 +46,11 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
   keystore, the account wiring (which relays, which signer, the coordinator list), chatroom models,
   UI and the `amy` verbs. Protocol decisions shared by every front end belong here, not there: a
   test, bench or vector that exercises only this library lives here too.
+- **What members send inside a group is cordn's, MLS state or not.** The kinds, tags and rules of
+  the application messages (`spec02Envelopes/`: `CordnMessageKinds`, `CordnAnnotationIndex`,
+  `CordnMessageReferences`, mentions, media tags) live here, as do the transport assembly and
+  discovery rules every client applies. The test: if another cordn client (cordn-web, `amy`, a bot)
+  would need the code to agree with us, it belongs here, not in an app.
 - Persisted formats are API: a store's bytes, a backup file, a TLV. Changing one breaks every device
   that already wrote it.
 - `commonMain` and `commonTest` stay free of JVM-only APIs; `verifyKmpPurity` and the metadata
