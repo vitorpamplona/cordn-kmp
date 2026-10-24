@@ -25,7 +25,7 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
 /**
  * What the delivery operator learns, as data rather than as documentation.
  *
- * §8 of `quartz/plans/2026-09-17-cordn-interop.md` ends with a requirement:
+ * §8 of `cordn/plans/2026-09-17-cordn-interop.md` ends with a requirement:
  * *"This section should be surfaced in the UI if we ship this, not buried. A
  * Marmot group and a cordn group have materially different metadata exposure
  * and users cannot infer that from either one looking like a group chat."*

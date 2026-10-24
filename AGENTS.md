@@ -42,6 +42,10 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
   (`CordnGroupStore`, `CordnBlobCipher`, `CordnCoordinatorLinkFactory`, …).
 - **Never depend on marmot-kmp**, and never let Quartz depend on this library. Tests that compare the
   two bindings live in Amethyst, the one place that has both.
+- **What stays in Amethyst:** the store implementations that encrypt files at rest with a platform
+  keystore, the account wiring (which relays, which signer, the coordinator list), chatroom models,
+  UI and the `amy` verbs. Protocol decisions shared by every front end belong here, not there: a
+  test, bench or vector that exercises only this library lives here too.
 - Persisted formats are API: a store's bytes, a backup file, a TLV. Changing one breaks every device
   that already wrote it.
 - `commonMain` and `commonTest` stay free of JVM-only APIs; `verifyKmpPurity` and the metadata
