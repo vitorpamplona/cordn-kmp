@@ -232,6 +232,36 @@ class CordnGroupManagerTest {
         }
 
     @Test
+    fun `a creator left off the admin list cannot invite anyone`() =
+        runTest {
+            // What `amy cordn group create --admin X` used to make: X named, the creator not.
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val aliceManager = manager(alice, coordinator)
+            val (_, stored) = bobsPublication()
+            coordinator.seedKeyPackage(stored)
+            aliceManager.createGroup(gid, CordnGroupMetadata(name = "Locked out", adminPubkeys = listOf(bob)))
+
+            assertFailsWith<IllegalStateException> { aliceManager.invite(gid, bob) }
+        }
+
+    @Test
+    fun `a new group's admins always include its creator`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val aliceManager = manager(alice, coordinator)
+            val (_, stored) = bobsPublication()
+            coordinator.seedKeyPackage(stored)
+            val admins = CordnGroupMetadata.adminsForNewGroup(creator = alice, coAdmins = listOf(bob), egalitarian = false)
+            assertEquals(listOf(alice, bob), admins)
+            assertEquals(emptyList(), CordnGroupMetadata.adminsForNewGroup(alice, listOf(bob), egalitarian = true))
+            assertEquals(listOf(alice), CordnGroupMetadata.adminsForNewGroup(alice, listOf(alice), egalitarian = false))
+
+            aliceManager.createGroup(gid, CordnGroupMetadata(name = "Mine", adminPubkeys = admins))
+
+            assertEquals(bob, aliceManager.invite(gid, bob).invited)
+        }
+
+    @Test
     fun `a non-admin cannot remove anyone`() =
         runTest {
             val coordinator = FakeCoordinator(callerPubKey = alice)
@@ -276,6 +306,26 @@ class CordnGroupManagerTest {
             // required_capabilities would vanish if only the metadata were sent
             // — and a group that lost it is one whose next commit peers reject.
             assertEquals(before, group.extensions.map { it.extensionType }.toSet())
+        }
+
+    @Test
+    fun `renaming through the current metadata keeps the icon and the image`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val aliceManager = manager(alice, coordinator)
+            aliceManager.createGroup(
+                gid,
+                CordnGroupMetadata(name = "Before", adminPubkeys = listOf(alice), icon = "\uD83C\uDF89", imageUrl = "https://example.com/g.png"),
+            )
+
+            aliceManager.updateGroupMetadata(gid) { it.copy(name = "After", description = "Renamed") }
+
+            val metadata = CordnGroupMetadata.fromExtensions(aliceManager.group(gid)!!.extensions)!!
+            assertEquals("After", metadata.name)
+            assertEquals("Renamed", metadata.description)
+            assertEquals("\uD83C\uDF89", metadata.icon)
+            assertEquals("https://example.com/g.png", metadata.imageUrl)
+            assertEquals(listOf(alice), metadata.adminPubkeys)
         }
 
     @Test

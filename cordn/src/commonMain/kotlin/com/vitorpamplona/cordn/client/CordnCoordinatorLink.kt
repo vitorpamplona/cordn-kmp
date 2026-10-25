@@ -49,7 +49,7 @@ interface CordnCoordinatorLink {
  *
  * The one piece a scope factory cannot supply on its own: a `CvmTransport`
  * needs a relay pool and the account's signers, which belong to whichever
- * front end is running; Amethyst's `CordnLinks.over` is the production one.
+ * front end is running; [CordnLinks.over] is the production one.
  * Everything else about a scope — where the bytes go and how they are
  * encrypted — is the same on every platform.
  */

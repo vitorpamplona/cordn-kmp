@@ -185,6 +185,40 @@ object CordnBackup {
 
             override fun hashCode(): Int = 31 * (31 * coordinatorPubKey.hashCode() + keyPackageRef.hashCode()) + bundle.contentHashCode()
         }
+
+        /** What [restore][CordnLocalState.write] lays down. A backup carries no room or echo state. */
+        fun toLocalState(): CordnLocalState =
+            CordnLocalState(
+                groups =
+                    groups.map {
+                        CordnLocalState.Group(
+                            coordinatorPubKey = it.coordinatorPubKey,
+                            gid = it.gid,
+                            state = it.state,
+                            cursor = it.cursor,
+                            roomState = null,
+                            echoState = null,
+                            joinedViaRequest = it.joinedViaRequest,
+                            messages = it.messages,
+                        )
+                    },
+                keyPackages = keyPackages.map { CordnLocalState.KeyPackage(it.coordinatorPubKey, it.keyPackageRef, it.bundle) },
+            )
+
+        companion object {
+            /** The archive of [state], for [accountPubKey] and its [coordinators]. */
+            fun of(
+                accountPubKey: HexKey,
+                coordinators: List<CoordinatorConfig>,
+                state: CordnLocalState,
+            ): Archive =
+                Archive(
+                    accountPubKey = accountPubKey,
+                    coordinators = coordinators,
+                    groups = state.groups.map { Group(it.coordinatorPubKey, it.gid, it.state, it.cursor, it.joinedViaRequest, it.messages) },
+                    keyPackages = state.keyPackages.map { KeyPackage(it.coordinatorPubKey, it.keyPackageRef, it.bundle) },
+                )
+        }
     }
 
     /** Encrypts [archive] under [passphrase]. */

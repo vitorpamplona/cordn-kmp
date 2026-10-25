@@ -25,8 +25,10 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
     binding (`CordnCredential`, `CordnGroupPolicy`); `sync/` for cursors and ingestion; `tlv/`.
   - `fixture/`: `CordnFixtureCoordinator`, an in-memory coordinator that records who made each call.
   - `client/`: the headless client a front end drives: `CordnGroupManager`, `CordnKeyPackages`,
-    `CordnSyncLoop`, `CordnCoordinatorRegistry`, the store interfaces with in-memory versions,
-    `CordnBackup`, `CordnHandoffState`.
+    `CordnSyncLoop`, `CordnCoordinatorRegistry` (invitations, coverage, the handoff guard),
+    `CordnLinks` (the coordinator transport), the store interfaces with in-memory versions,
+    `CordnLocalState` (what a backup and a handoff carry), `CordnBackup`, `CordnHandoffState`,
+    `CordnTipBlobStore` (the migration blob rules over an app's HTTP).
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, ts-mls interop), `jvmTest` (`appMultiDevice`
     and the `client/` suites).
   - `cordn/tools/cordn-vector-gen`: Node generator for `coordinator-contracts.json`.

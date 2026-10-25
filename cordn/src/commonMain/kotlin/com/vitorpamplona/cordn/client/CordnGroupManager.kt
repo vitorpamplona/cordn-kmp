@@ -57,6 +57,8 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 /**
  * The cordn groups this account holds on one coordinator.
@@ -452,6 +454,22 @@ class CordnGroupManager(
 
         persist(gid)
         return MetadataUpdateResult(gid, posted.cursor)
+    }
+
+    /**
+     * Changes [gid]'s metadata by [change], applied to what the group carries now.
+     *
+     * The safe way to edit one field. The extension is replaced whole, so a caller that built a
+     * fresh [CordnGroupMetadata] from the fields it was editing (a rename: name and description)
+     * erased the rest (the icon, the image URL) on every save. [change] receives the current
+     * metadata, or an empty one when the group has none.
+     */
+    suspend fun updateGroupMetadata(
+        gid: String,
+        change: (CordnGroupMetadata) -> CordnGroupMetadata,
+    ): MetadataUpdateResult {
+        val current = CordnGroupMetadata.fromExtensions(requireGroup(gid).extensions) ?: CordnGroupMetadata(name = "")
+        return updateGroupMetadata(gid, change(current))
     }
 
     /**
@@ -1017,6 +1035,16 @@ class CordnGroupManager(
         /** `spec/02.md` §6: a cordn chat message is a NIP-C7 kind 9. */
         const val CHAT_KIND = 9
 
+        /**
+         * A fresh `gid`: a random UUID, which is what cordn's own client uses.
+         *
+         * The `gid` is the creator's to choose (`spec/00.md` §4) and the coordinator never
+         * interprets it. The one hard rule is that it must not be derived from the MLS
+         * `group_id`, which is secret.
+         */
+        @OptIn(ExperimentalUuidApi::class)
+        fun newGid(): String = Uuid.random().toString()
+
         // Why a Welcome was left in the inbox. Each is actionable and each
         // reaches a user, so they are constants rather than strings written at
         // the throw site: a reason nobody can act on is just an error message.
@@ -1182,4 +1210,31 @@ data class BatchInviteResult(
     val invited: List<InviteResult>,
     val undelivered: Map<HexKey, Throwable>,
     val refused: Map<HexKey, CordnGroupException>,
-)
+) {
+    /** One row per person in [roster], in its order: what to show for "three of five went out". */
+    fun outcomes(roster: List<HexKey>): List<CordnInviteOutcome> =
+        roster.map { target ->
+            val undelivered = undelivered[target]
+            CordnInviteOutcome(
+                pubKey = target,
+                failure = refused[target] ?: undelivered,
+                joinedWithoutWelcome = undelivered != null,
+            )
+        }
+}
+
+/**
+ * One invitation attempt, in one of three states.
+ *
+ * [sent] is done. A failure with [joinedWithoutWelcome] means the commit that added them went
+ * through and only the Welcome did not, so they are a member who cannot join yet: resending
+ * reaches them. A failure without it never touched the group, so there is nothing to resend and a
+ * share link is the only way to them.
+ */
+data class CordnInviteOutcome(
+    val pubKey: HexKey,
+    val failure: Throwable?,
+    val joinedWithoutWelcome: Boolean = false,
+) {
+    val sent: Boolean get() = failure == null
+}

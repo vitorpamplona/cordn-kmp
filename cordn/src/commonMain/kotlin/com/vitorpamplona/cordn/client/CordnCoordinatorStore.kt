@@ -22,6 +22,7 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.codec.TlsWriter
+import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 
 /**
@@ -117,4 +118,28 @@ object CoordinatorListCodec {
         }
         return out
     }
+}
+
+/** Remembers [config], replacing any entry for the same coordinator. */
+suspend fun CordnCoordinatorStore.upsert(config: CoordinatorConfig) = save(load().filterNot { it.pubKey == config.pubKey } + config)
+
+/** Forgets [coordinatorPubKey]; false when it was not remembered. */
+suspend fun CordnCoordinatorStore.remove(coordinatorPubKey: HexKey): Boolean {
+    val before = load()
+    val after = before.filterNot { it.pubKey == coordinatorPubKey }
+    if (after.size == before.size) return false
+    save(after)
+    return true
+}
+
+/**
+ * Records [open] as the coordinators in use, keeping any remembered one that is not open now
+ * (its session may simply have failed to open today) except [forgotten].
+ */
+suspend fun CordnCoordinatorStore.rememberOpen(
+    open: List<CoordinatorConfig>,
+    forgotten: HexKey? = null,
+) {
+    val openKeys = open.mapTo(mutableSetOf()) { it.pubKey }
+    save(load().filterNot { it.pubKey in openKeys || it.pubKey == forgotten } + open)
 }
