@@ -151,5 +151,6 @@ data class GroupExposure(
      * is a self-hosted coordinator, where the answer changes without any of
      * this code changing.
      */
+    @Deprecated("A comparison with another binding is the front end's to make; cordn does not know Marmot. Removed in 2.0.")
     fun differsFromMarmot(): Boolean = true
 }

@@ -90,14 +90,16 @@ script pins `node --experimental-strip-types`.
 
 ## Six things that are easy to get wrong
 
-1. **A cordn group has no admins in the enforcement sense.** `spec/01.md` §5.3
-   makes `admin_pubkeys` *presentation* metadata, and neither the spec nor the
-   reference coordinator restricts who may commit. Any member can commit
-   anything MLS permits, including removing others. An empty list means
-   **egalitarian**, permanently — Marmot reads the same empty set as "bootstrap,
-   gate still open", which is why no authorization code is shared between them.
-   A UI presenting a cordn admin list as an access-control boundary would be
-   lying.
+1. **cordn's admin rule is the reference client's, not Marmot's.** `spec/01.md`
+   §5.3 leaves `admin_pubkeys` to the application; the reference client refuses
+   to build, and rejects on arrival, an add, a remove or a metadata change from
+   a member who is not listed, and allows an Update, a SelfRemove or a PSK from
+   anyone. `CordnGroupPolicy.authorizeCommit` matches that exactly, in both
+   directions: stricter or looser forks the epoch against the reference. An
+   empty list means **egalitarian**, permanently — Marmot reads the same empty
+   set as "bootstrap, gate still open" and adds rules cordn lacks (self-demotion
+   before leaving, depletion), which is why no authorization code is shared
+   between them.
 
 2. **The credential is 64 ASCII bytes of hex, not 32 raw bytes.** `spec/00.md`
    §6 requires "the canonical encoded Nostr public key" and explicitly declines

@@ -28,12 +28,12 @@ import com.vitorpamplona.quartz.nip19Bech32.decodePublicKeyAsHexOrNull
  *
  * ## Why cordn needs its own, small version of this
  *
- * Amethyst's rich-text rendering is built on `Note`, and a `Note` comes from
- * `LocalCache`. Nothing cordn receives may go in there — a cordn message is an
- * MLS payload that never touched a relay, and giving it a `Note` would make
- * private group chat searchable and notifiable alongside published events.
- * So the parsing happens here, on the envelope's own content, and the result
- * is plain data a composable can walk.
+ * A client's rich-text rendering usually runs over its event cache, and
+ * nothing cordn receives may go in there — a cordn message is an MLS payload
+ * that never touched a relay, and caching it with published events would make
+ * private group chat searchable and notifiable alongside them. So the parsing
+ * happens here, on the envelope's own content, and the result is plain data a
+ * screen can walk.
  *
  * Resolving a mentioned pubkey to a **display name** is a different question
  * and a safe one: a profile is public relay data that the cache holds anyway,
