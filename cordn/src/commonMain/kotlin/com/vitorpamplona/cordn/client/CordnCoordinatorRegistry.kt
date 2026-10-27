@@ -23,7 +23,10 @@ package com.vitorpamplona.cordn.client
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorServerInfo
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.utils.Log
 import com.vitorpamplona.quartz.utils.TimeUtils
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -140,6 +143,20 @@ class CordnSession(
     /** How many of this session's responses arrived reassembled over CEP-22. */
     val oversizedTransfers: Int get() = scope.coordinator.oversizedTransfers
 
+    /**
+     * Asks to be added to [gid], naming [keyPackageRef] or, when null, a freshly published one.
+     *
+     * Fresh by default because there is no way to be added without a KeyPackage on this
+     * coordinator (`spec/00.md` §4.2 gives cordn no KeyPackage event kind), and because one
+     * published earlier may already have been taken by somebody's invitation: KeyPackages are
+     * single-use, so naming a spent one asks to be added with a key nobody can use. Publishing is
+     * attributable (§8.4), which is what asking strangers to add you already is.
+     */
+    suspend fun requestToJoin(
+        gid: String,
+        keyPackageRef: String? = null,
+    ): Long = manager.requestToJoin(gid, keyPackageRef ?: keyPackages.publishNew().keyPackageRef)
+
     internal suspend fun close() = scope.close()
 }
 
@@ -173,9 +190,17 @@ class CordnSession(
  * two stay separate under the §3.1 rule in
  * Amethyst's `amethyst/plans/2026-09-19-cordn-ui.md`.
  */
+private const val TAG = "CordnCoordinatorRegistry"
+
 class CordnCoordinatorRegistry(
     val accountPubKey: HexKey,
     private val scopes: CordnCoordinatorScopeFactory,
+    /**
+     * When set, a device that has handed its groups to another refuses to open or reuse a session
+     * ([CordnHandedOffException]): two devices committing from one MLS leaf fork the ratchet tree,
+     * and MLS does not recover. A label-only change is still allowed; it advances no epoch.
+     */
+    private val handoff: CordnHandoffState? = null,
 ) {
     private val lock = Mutex()
     private val sessions = mutableMapOf<HexKey, CordnSession>()
@@ -200,7 +225,7 @@ class CordnCoordinatorRegistry(
         lock.withLock {
             sessions[config.pubKey]?.let { existing ->
                 when {
-                    existing.config == config -> existing
+                    existing.config == config -> existing.also { handoff?.requireNotHandedOff() }
 
                     // Only the name changed. Reopening for that would cost the
                     // connection and orphan whoever holds the current manager,
@@ -211,9 +236,15 @@ class CordnCoordinatorRegistry(
                             publish()
                         }
 
-                    else -> replaceConfig(existing, config)
+                    else -> {
+                        handoff?.requireNotHandedOff()
+                        replaceConfig(existing, config)
+                    }
                 }
-            } ?: open(config).also { publish() }
+            } ?: run {
+                handoff?.requireNotHandedOff()
+                open(config).also { publish() }
+            }
         }
 
     /** The session for [coordinatorPubKey], or null if none is open. */
@@ -258,6 +289,53 @@ class CordnCoordinatorRegistry(
             sessions.clear()
             publish()
         }
+    }
+
+    /**
+     * Every invitation waiting for this account on the open coordinators, opened but not answered.
+     *
+     * One round trip per open coordinator, made when asked and at no other time: every call to a
+     * coordinator is metadata (§8), so a badge that stayed up to date would tell each coordinator
+     * how often this account opens the app. A coordinator that fails to answer is reported, not
+     * dropped: "we could not ask" and "there is nothing for you" mean opposite things.
+     */
+    suspend fun invitations(): CordnInvitations {
+        val pending = mutableListOf<CordnInvitation>()
+        val skipped = mutableListOf<CordnSkippedInvitation>()
+        val unreachable = mutableListOf<CordnCoordinatorFailure>()
+        coordinators.value.forEach { config ->
+            val session = sessionOrNull(config.pubKey) ?: return@forEach
+            try {
+                val inbox = session.manager.pendingWelcomes(session.keyPackages::bundleFor)
+                pending += inbox.pending.map { CordnInvitation(config, it) }
+                skipped += inbox.skipped.map { CordnSkippedInvitation(config, it.keyPackageRef, it.reason) }
+            } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
+                Log.w(TAG, "could not read invitations from ${config.pubKey.take(8)}: ${e.message}", e)
+                unreachable += CordnCoordinatorFailure(config, e.message ?: "the coordinator did not answer")
+            }
+        }
+        return CordnInvitations(pending, skipped, unreachable)
+    }
+
+    /**
+     * Which of [roster] [coordinatorPubKey] could deliver a Welcome to.
+     *
+     * An invitation is a Welcome addressed to a KeyPackage the invitee published *there*, so a
+     * coordinator holding none for somebody cannot invite them at all. One `kp_list` answers for
+     * the whole roster; `kp_take` by identity would consume a single-use package, so it is never
+     * a probe. Answers only for a coordinator with an open session: opening one is what commits
+     * to it, and a screen that is still only looking must not do that on the user's behalf.
+     */
+    suspend fun coverage(
+        coordinatorPubKey: HexKey,
+        roster: Set<HexKey>,
+    ): CordnCoverage {
+        val identities =
+            sessionOrNull(coordinatorPubKey)?.keyPackages?.identitiesWithKeyPackages()
+                ?: return CordnCoverage(coordinatorPubKey, emptySet(), roster, answered = false)
+        val reachable = roster.filterTo(mutableSetOf()) { it in identities }
+        return CordnCoverage(coordinatorPubKey, reachable, roster - reachable, answered = true)
     }
 
     private suspend fun replaceConfig(
@@ -307,3 +385,45 @@ class CordnCoordinatorRegistry(
         _coordinators.value = sessions.values.map { it.config }
     }
 }
+
+/** One invitation, and which coordinator it came through. */
+data class CordnInvitation(
+    val coordinator: CoordinatorConfig,
+    val welcome: OpenedWelcome,
+)
+
+/** An invitation that could not be opened, and why: the reason is for a person to read. */
+data class CordnSkippedInvitation(
+    val coordinator: CoordinatorConfig,
+    val keyPackageRef: String,
+    val reason: String,
+)
+
+/** A coordinator that did not answer. Not the same as one with nothing to say. */
+data class CordnCoordinatorFailure(
+    val coordinator: CoordinatorConfig,
+    val reason: String,
+)
+
+/** What every open coordinator had waiting. */
+data class CordnInvitations(
+    val pending: List<CordnInvitation>,
+    val skipped: List<CordnSkippedInvitation>,
+    val unreachable: List<CordnCoordinatorFailure>,
+) {
+    val isEmpty: Boolean get() = pending.isEmpty() && skipped.isEmpty() && unreachable.isEmpty()
+}
+
+/**
+ * What one coordinator could do with a roster.
+ *
+ * [answered] apart from [unreachable] deliberately: an empty [reachable] on an unanswered
+ * coordinator means nobody asked it, not that it holds nothing. Folding the two together turns a
+ * missing session or a failed call into a claim about the people in the roster.
+ */
+data class CordnCoverage(
+    val coordinatorPubKey: HexKey,
+    val reachable: Set<HexKey>,
+    val unreachable: Set<HexKey>,
+    val answered: Boolean,
+)

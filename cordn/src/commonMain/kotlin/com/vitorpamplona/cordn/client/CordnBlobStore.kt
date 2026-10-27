@@ -23,10 +23,9 @@ package com.vitorpamplona.cordn.client
 /**
  * A content-addressed store for sealed migration documents (§12).
  *
- * Injected rather than depended on directly because the only Blossom uploader
- * in this codebase needs an Android `Context`, and the migration service has to
- * stay runnable from `amy` and from a test with no Android at all. The same
- * reason `CordnCoordinatorLinkFactory` is injected.
+ * [CordnTipBlobStore] is the implementation every front end uses, over its own
+ * HTTP client ([CordnBlossomHttp]); the interface stays so a test can store
+ * documents in memory.
  *
  * ## The one requirement that is not about bytes
  *

@@ -178,7 +178,12 @@ object CordnMessageReferences {
         val kind: Int,
         /** The target's own tags, read to find the thread root. Empty is fine. */
         val tags: TagArray = emptyArray(),
-    )
+    ) {
+        companion object {
+            /** The target fields of a delivered [envelope], its own tags included so a reply to a reply keeps the thread root. */
+            fun of(envelope: CordnEnvelope): Target = Target(envelope.id, envelope.pubKey, envelope.kind, envelope.tags)
+        }
+    }
 
     /** What one outbound message will be, once its kind and tags are decided. */
     data class Outbound(

@@ -89,6 +89,18 @@ object CordnMediaEncryption {
     fun mediaKey(group: MlsGroup): ByteArray = CordnGroupPolicy.MEDIA_EXPORTER.let { group.exporterSecret(it.label, it.context, it.length) }
 
     /**
+     * Seals [plaintext] for [group] the way every cordn sender must: under the media key of the
+     * group's current epoch (§3.1, derived from the epoch exporter and never sent), so any member
+     * opens it from group state alone.
+     */
+    fun sealFor(
+        group: MlsGroup,
+        plaintext: ByteArray,
+        mimeType: String,
+        filename: String,
+    ): CordnEncryptedMedia = encrypt(plaintext, mediaKey(group), mimeType, filename)
+
+    /**
      * Encrypts [plaintext] for a group, binding it to its type and name.
      *
      * [mimeType] and [filename] are authenticated, not encrypted: a recipient

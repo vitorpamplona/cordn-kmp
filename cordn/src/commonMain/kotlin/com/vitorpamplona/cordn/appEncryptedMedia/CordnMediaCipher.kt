@@ -26,13 +26,10 @@ import com.vitorpamplona.crypto.SymmetricCipher
  * cordn's encrypted media as a [SymmetricCipher], so the ordinary media pipeline
  * can open it.
  *
- * Registering one of these against a blob URL in the encryption key cache is
- * what lets `EncryptedBlobInterceptor` decrypt the download in flight, which in
- * turn lets a cordn attachment go through `ZoomableContentView` like every
- * other image, video and voice note in the app. Before this existed the cordn
- * chat fetched and decrypted blobs by hand and drew its own `Image`, an "Open
- * <filename>" button and its own audio player — so the one chat with encrypted
- * media was the one chat whose media did not look like the rest of the app.
+ * An app registers one against a blob URL wherever its media pipeline keeps
+ * ciphers, and the download decrypts in flight like any other encrypted media,
+ * instead of the chat fetching and decrypting blobs by hand and drawing its own
+ * viewer.
  *
  * The same shape as `Mip04Cipher` and `EncryptedMediaV2Cipher`: a sending
  * constructor that produces the nonce, and a receiving one that is handed the

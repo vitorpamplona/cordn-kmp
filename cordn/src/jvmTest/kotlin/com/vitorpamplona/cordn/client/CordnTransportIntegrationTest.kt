@@ -41,7 +41,7 @@ import kotlin.test.assertTrue
  * This is the same lifecycle over `CvmTransport` → `InMemoryRelayPool` →
  * `CvmFixtureServer` → `CordnFixtureCoordinator`. The only thing standing in for
  * production is the relay (in memory) and the coordinator (ours, because the
- * reference one is unlicensed — see `quartz/plans/2026-09-17-cordn-interop.md`
+ * reference one is unlicensed — see `cordn/plans/2026-09-17-cordn-interop.md`
  * §7). Everything between the manager and the relay is the shipped code.
  *
  * **Encryption is left at its default.** `CvmGiftWrap` defaults to

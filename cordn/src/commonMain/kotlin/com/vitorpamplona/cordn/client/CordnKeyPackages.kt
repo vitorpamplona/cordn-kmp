@@ -312,6 +312,37 @@ class CordnKeyPackages(
     }
 
     /**
+     * Keeps the pool healthy on a coordinator this account already uses, and does nothing at all
+     * on one it does not.
+     *
+     * The condition is the whole design. Publishing a KeyPackage is an attributable act under the
+     * account key (§8.4): it tells the coordinator this account exists and is invitable, which is
+     * not something to do on someone's behalf at login. But once one IS published there, the
+     * coordinator already knows, and letting the pool drain has a cost with no matching benefit:
+     * `kp_take` consumes a single-use package, and an empty pool means the next invitation fails
+     * for a reason the inviter sees and the invitee never does. So: never the first package,
+     * always the ones after it.
+     */
+    suspend fun maintain() {
+        if (!hasPublished()) return
+        topUp()
+        ensureLastResort()
+    }
+
+    /**
+     * What this account has published here, and which of it this device can still open.
+     *
+     * Both halves matter and neither implies the other. The coordinator's listing is the truth
+     * about what an inviter can take; the local store is the truth about whether the resulting
+     * Welcome can be opened. A package listed there with no private half here belongs to another
+     * device of this account, or to an install that is gone.
+     */
+    suspend fun inventory(): List<CordnKeyPackageRow> {
+        val held = published.value
+        return listPublished().map { CordnKeyPackageRow(it.keyPackageRef, it.lastResort, it.at, openableHere = it.keyPackageRef in held) }
+    }
+
+    /**
      * Tops up to [minimum] single-use KeyPackages on the coordinator.
      *
      * Counts what the coordinator actually holds for this account rather than
@@ -394,3 +425,12 @@ class CordnKeyPackages(
         const val SNAPSHOT_TTL_SECONDS = 60L
     }
 }
+
+/** One published KeyPackage, as a key-package screen or `amy cordn keypackage list` shows it. */
+data class CordnKeyPackageRow(
+    val keyPackageRef: String,
+    val lastResort: Boolean,
+    val at: Long,
+    /** Whether this device holds the private half and could open its Welcome. */
+    val openableHere: Boolean,
+)

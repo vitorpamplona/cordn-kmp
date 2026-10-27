@@ -42,7 +42,7 @@ import kotlinx.coroutines.yield
  * `CvmTransport` → `InMemoryRelayPool` → `CvmFixtureServer` →
  * `CordnFixtureCoordinator`. The only stand-ins are the relay (in memory) and
  * the coordinator (ours, because the reference one is unlicensed — see
- * `quartz/plans/2026-09-17-cordn-interop.md` §7). Everything between an account
+ * `cordn/plans/2026-09-17-cordn-interop.md` §7). Everything between an account
  * and the relay is the shipped code.
  *
  * **Encryption is left at its default**, which is `EncryptionMode.REQUIRED`

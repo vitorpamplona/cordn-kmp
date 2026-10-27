@@ -25,8 +25,10 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
     binding (`CordnCredential`, `CordnGroupPolicy`); `sync/` for cursors and ingestion; `tlv/`.
   - `fixture/`: `CordnFixtureCoordinator`, an in-memory coordinator that records who made each call.
   - `client/`: the headless client a front end drives: `CordnGroupManager`, `CordnKeyPackages`,
-    `CordnSyncLoop`, `CordnCoordinatorRegistry`, the store interfaces with in-memory versions,
-    `CordnBackup`, `CordnHandoffState`.
+    `CordnSyncLoop`, `CordnCoordinatorRegistry` (invitations, coverage, the handoff guard),
+    `CordnLinks` (the coordinator transport), the store interfaces with in-memory versions,
+    `CordnLocalState` (what a backup and a handoff carry), `CordnBackup`, `CordnHandoffState`,
+    `CordnTipBlobStore` (the migration blob rules over an app's HTTP).
   - Tests: `commonTest`, `jvmAndroidTest` (JUnit, ts-mls interop), `jvmTest` (`appMultiDevice`
     and the `client/` suites).
   - `cordn/tools/cordn-vector-gen`: Node generator for `coordinator-contracts.json`.
@@ -43,6 +45,15 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
   (`CordnGroupStore`, `CordnBlobCipher`, `CordnCoordinatorLinkFactory`, …).
 - **Never depend on marmot-kmp**, and never let Quartz depend on this library. Tests that compare the
   two bindings live in Amethyst, the one place that has both.
+- **What stays in Amethyst:** the store implementations that encrypt files at rest with a platform
+  keystore, the account wiring (which relays, which signer, the coordinator list), chatroom models,
+  UI and the `amy` verbs. Protocol decisions shared by every front end belong here, not there: a
+  test, bench or vector that exercises only this library lives here too.
+- **What members send inside a group is cordn's, MLS state or not.** The kinds, tags and rules of
+  the application messages (`spec02Envelopes/`: `CordnMessageKinds`, `CordnAnnotationIndex`,
+  `CordnMessageReferences`, mentions, media tags) live here, as do the transport assembly and
+  discovery rules every client applies. The test: if another cordn client (cordn-web, `amy`, a bot)
+  would need the code to agree with us, it belongs here, not in an app.
 - Persisted formats are API: a store's bytes, a backup file, a TLV. Changing one breaks every device
   that already wrote it.
 - `commonMain` and `commonTest` stay free of JVM-only APIs; `verifyKmpPurity` and the metadata

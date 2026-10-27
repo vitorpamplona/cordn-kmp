@@ -223,10 +223,16 @@ object CordnGroupPolicy : MlsGroupPolicy {
     fun isAdmin(
         group: GroupView,
         pubKey: HexKey,
-    ): Boolean {
-        val admins = adminIdentitiesIn(group.extensions)
-        return admins.isEmpty() || pubKey in admins
-    }
+    ): Boolean = isAdmin(adminIdentitiesIn(group.extensions), pubKey)
+
+    /**
+     * The same rule over an admin list already read off the group: an empty list is egalitarian
+     * (`spec/01.md` §5.3), so everybody may.
+     */
+    fun isAdmin(
+        admins: Collection<HexKey>,
+        pubKey: HexKey,
+    ): Boolean = admins.isEmpty() || pubKey in admins
 
     /**
      * True if the member at [leafIndex] may.

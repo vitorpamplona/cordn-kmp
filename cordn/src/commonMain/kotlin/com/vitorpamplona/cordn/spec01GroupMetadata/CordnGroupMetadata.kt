@@ -94,6 +94,20 @@ data class CordnGroupMetadata(
         /** Version 0 is reserved and MUST be rejected (`spec/01.md` §4). */
         const val VERSION = 1
 
+        /**
+         * `admin_pubkeys` for a group [creator] is about to create.
+         *
+         * Empty when [egalitarian] (`spec/01.md` §5.3: every member equal, for good); otherwise
+         * [creator] first and then [coAdmins]. Never [coAdmins] alone: `CordnGroupPolicy`
+         * enforces a non-empty list, so a group whose creator is not on it is one whose only
+         * member cannot invite anybody.
+         */
+        fun adminsForNewGroup(
+            creator: HexKey,
+            coAdmins: Collection<HexKey>,
+            egalitarian: Boolean,
+        ): List<HexKey> = if (egalitarian) emptyList() else (listOf(creator) + coAdmins).distinct()
+
         private const val PUBKEY_HEX_LENGTH = 64
         private const val HEX_ALPHABET = "0123456789abcdef"
 

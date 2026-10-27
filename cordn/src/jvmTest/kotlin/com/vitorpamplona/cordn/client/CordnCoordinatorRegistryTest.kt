@@ -330,4 +330,70 @@ class CordnCoordinatorRegistryTest : CordnTransportHarness() {
 
             assertTrue(session.health.state.value.isUnknown, "silence should leave health unknown")
         }
+
+    private class MemoryHandoffStore : CordnHandoffStore {
+        var value = false
+
+        override suspend fun load() = value
+
+        override suspend fun save(handedOff: Boolean) {
+            value = handedOff
+        }
+    }
+
+    @Test
+    fun `a handed-off registry opens no session and reuses none`() =
+        runTest {
+            val handoff = CordnHandoffState(MemoryHandoffStore())
+            val registry = CordnCoordinatorRegistry(account.pubKey, CountingFactory(), handoff)
+            driving { registry.session(config) }
+
+            handoff.markHandedOff()
+
+            assertTrue(runCatching { driving { registry.session(config) } }.exceptionOrNull() is CordnHandedOffException, "reuse")
+            assertTrue(
+                runCatching { driving { registry.session(config.copy(pubKey = secondCoordinatorPubKey)) } }.exceptionOrNull() is CordnHandedOffException,
+                "open",
+            )
+        }
+
+    @Test
+    fun `a handed-off registry still takes a new label, which advances no epoch`() =
+        runTest {
+            val handoff = CordnHandoffState(MemoryHandoffStore())
+            val registry = CordnCoordinatorRegistry(account.pubKey, CountingFactory(), handoff)
+            driving { registry.session(config) }
+            handoff.markHandedOff()
+
+            val renamed = driving { registry.session(config.copy(label = "Work")) }
+
+            assertEquals("Work", renamed.config.label)
+        }
+
+    @Test
+    fun `coverage on a coordinator with no session says nobody asked`() =
+        runTest {
+            val registry = registry(CountingFactory())
+            val roster = setOf("aa".repeat(32), "bb".repeat(32))
+
+            val coverage = registry.coverage(config.pubKey, roster)
+
+            assertEquals(false, coverage.answered)
+            assertEquals(roster, coverage.unreachable)
+        }
+
+    @Test
+    fun `asking to join names a freshly published key package`() =
+        runTest {
+            val registry = registry(CountingFactory())
+            val session = driving { registry.session(config) }
+            assertTrue(
+                session.keyPackages.published.value
+                    .isEmpty(),
+            )
+
+            driving { session.requestToJoin(gid) }
+
+            assertEquals(1, session.keyPackages.published.value.size, "a key package was published for the request")
+        }
 }
