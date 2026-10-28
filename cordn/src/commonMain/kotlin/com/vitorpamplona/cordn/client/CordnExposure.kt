@@ -142,15 +142,4 @@ data class GroupExposure(
             if (publishedKeyPackage) add(ExposureNote.PUBLICATION_IS_A_SIGNED_RECORD)
             add(ExposureNote.MESSAGE_SIZES_UNPADDED)
         }
-
-    /**
-     * Whether this group's exposure differs from a Marmot group's in a way the
-     * user should be told before they treat the two the same.
-     *
-     * Always true today, and written as a function anyway: the interesting case
-     * is a self-hosted coordinator, where the answer changes without any of
-     * this code changing.
-     */
-    @Deprecated("A comparison with another binding is the front end's to make; cordn does not know Marmot. Removed in 2.0.")
-    fun differsFromMarmot(): Boolean = true
 }
