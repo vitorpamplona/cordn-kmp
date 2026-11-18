@@ -252,4 +252,170 @@ class CordnAnnotationIndexTest {
         assertTrue(index.edits.isEmpty())
         assertTrue(index.deleted.isEmpty())
     }
+
+    // ---- reaction removal (cordn-web 0.5.2, `references.ts`) ----------------
+
+    @Test
+    fun `deleting your own reaction removes it`() {
+        val note = message(alice, CordnMessageKinds.TEXT, "ship it")
+        val reaction = message(bob, CordnMessageKinds.REACTION, "+", CordnMessageReferences.reactionTags(note.asTarget()))
+        val removal = message(bob, CordnMessageKinds.DELETION, "", CordnMessageReferences.deleteTags(reaction.asTarget()))
+
+        val index = CordnAnnotationIndex.of(listOf(note, reaction, removal))
+
+        assertEquals(null, index.reactions[note.envelope.id]?.get("+"), "a removed reaction must not keep its chip")
+        assertTrue(index.isDeleted(reaction.envelope.id))
+    }
+
+    @Test
+    fun `removing one of two reactions from the same account keeps the chip`() {
+        // Two devices of one account each reacted: membership is "at least one
+        // live reaction event", so removing one of them keeps the reactor.
+        val note = message(alice, CordnMessageKinds.TEXT, "ship it")
+        val fromPhone = message(bob, CordnMessageKinds.REACTION, "+", CordnMessageReferences.reactionTags(note.asTarget()))
+        val fromLaptop = message(bob, CordnMessageKinds.REACTION, "+", CordnMessageReferences.reactionTags(note.asTarget()), createdAt = 1_757_000_001L)
+        val removal = message(bob, CordnMessageKinds.DELETION, "", CordnMessageReferences.deleteTags(fromPhone.asTarget()))
+
+        val index = CordnAnnotationIndex.of(listOf(note, fromPhone, fromLaptop, removal))
+
+        assertEquals(setOf(bob), index.reactions[note.envelope.id]?.get("+"))
+    }
+
+    @Test
+    fun `nobody can remove somebody else's reaction`() {
+        val note = message(alice, CordnMessageKinds.TEXT, "ship it")
+        val reaction = message(bob, CordnMessageKinds.REACTION, "+", CordnMessageReferences.reactionTags(note.asTarget()))
+        val removal = message(alice, CordnMessageKinds.DELETION, "", CordnMessageReferences.deleteTags(reaction.asTarget()))
+
+        val index = CordnAnnotationIndex.of(listOf(note, reaction, removal))
+
+        assertEquals(setOf(bob), index.reactions[note.envelope.id]?.get("+"))
+    }
+
+    // ---- polls and calendar (cordn-web 0.6.0, calendar-events.md) -----------
+
+    @Test
+    fun `poll votes and RSVPs are never rows, polls are`() {
+        assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.POLL_RESPONSE))
+        assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.CALENDAR_RSVP))
+        assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.REACTION))
+        assertTrue(!CordnMessageKinds.isStreamHidden(CordnMessageKinds.POLL))
+        assertTrue(!CordnMessageKinds.isStreamHidden(CordnMessageKinds.CALENDAR_TIME))
+        assertTrue(!CordnMessageKinds.isStreamHidden(CordnMessageKinds.TEXT))
+    }
+
+    private fun calendarEvent(
+        author: HexKey,
+        d: String,
+        title: String,
+        createdAt: Long,
+        kind: Int = CordnMessageKinds.CALENDAR_TIME,
+    ) = message(
+        author,
+        kind,
+        "",
+        arrayOf(arrayOf("d", d), arrayOf("title", title), arrayOf("start", "1757000000"), arrayOf("alt", "Calendar event: $title")),
+        createdAt = createdAt,
+    )
+
+    /** `calendar-events.md` §6: `a` = coordinate, `e` = latest revision, `k`, `alt`. */
+    private fun cancellation(
+        sender: HexKey,
+        event: CordnDeliveredMessage,
+    ) = message(
+        sender,
+        CordnMessageKinds.DELETION,
+        "",
+        arrayOf(
+            arrayOf("a", "${event.envelope.kind}:${event.envelope.pubKey}:d1"),
+            arrayOf("e", event.envelope.id, "", event.envelope.pubKey),
+            arrayOf("k", event.envelope.kind.toString()),
+            arrayOf("alt", "Calendar event cancelled"),
+        ),
+    )
+
+    @Test
+    fun `only the latest revision of a calendar event is a row`() {
+        val first = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val second = calendarEvent(alice, "d1", "Standup, moved", createdAt = 200)
+        val other = calendarEvent(alice, "d2", "Retro", createdAt = 150)
+
+        val index = CordnAnnotationIndex.of(listOf(first, second, other))
+
+        assertTrue(index.isHidden(first.envelope.id), "an earlier revision is suppressed")
+        assertTrue(!index.isHidden(second.envelope.id))
+        assertTrue(!index.isHidden(other.envelope.id), "another d is another event")
+        assertTrue(!index.isDeleted(first.envelope.id), "suppressed, not deleted (§5)")
+        assertTrue(index.isRevised(second.envelope.id))
+        assertTrue(!index.isRevised(other.envelope.id))
+    }
+
+    @Test
+    fun `revision order is created_at, then the cursor`() {
+        val later = calendarEvent(alice, "d1", "later", createdAt = 300)
+        val earlierButAfter = calendarEvent(alice, "d1", "earlier", createdAt = 200)
+        val index = CordnAnnotationIndex.of(listOf(later, earlierButAfter))
+        assertTrue(!index.isHidden(later.envelope.id))
+        assertTrue(index.isHidden(earlierButAfter.envelope.id))
+
+        val a = calendarEvent(alice, "d1", "a", createdAt = 400)
+        val b = calendarEvent(alice, "d1", "b", createdAt = 400)
+        val tie = CordnAnnotationIndex.of(listOf(a, b))
+        assertTrue(!tie.isHidden(b.envelope.id), "same second: the higher cursor wins")
+        assertTrue(tie.isHidden(a.envelope.id))
+    }
+
+    @Test
+    fun `the kind is part of a calendar event's identity, and so is its author`() {
+        val timed = calendarEvent(alice, "d1", "timed", createdAt = 100)
+        val allDay = calendarEvent(alice, "d1", "all day", createdAt = 200, kind = CordnMessageKinds.CALENDAR_DATE)
+        val bobs = calendarEvent(bob, "d1", "bob's", createdAt = 300)
+
+        val index = CordnAnnotationIndex.of(listOf(timed, allDay, bobs))
+
+        assertTrue(listOf(timed, allDay, bobs).none { index.isHidden(it.envelope.id) })
+    }
+
+    @Test
+    fun `a cancelled event is cancelled, not deleted`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val index = CordnAnnotationIndex.of(listOf(event, cancellation(alice, event)))
+
+        assertTrue(index.isCancelled(event.envelope.id))
+        assertTrue(!index.isDeleted(event.envelope.id), "§6: the row renders the cancelled card, not 'message deleted'")
+        assertTrue(!index.isHidden(event.envelope.id))
+    }
+
+    @Test
+    fun `only the author can cancel`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val index = CordnAnnotationIndex.of(listOf(event, cancellation(bob, event)))
+
+        assertTrue(!index.isCancelled(event.envelope.id))
+        assertTrue(!index.isDeleted(event.envelope.id))
+    }
+
+    @Test
+    fun `a revision after the cancellation revives the event`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val cancel = cancellation(alice, event)
+        val revived = calendarEvent(alice, "d1", "Standup, back on", createdAt = 200)
+
+        val index = CordnAnnotationIndex.of(listOf(event, cancel, revived))
+
+        assertTrue(!index.isCancelled(revived.envelope.id), "§6: a later revision (higher cursor) revives it")
+        assertTrue(index.isHidden(event.envelope.id))
+    }
+
+    @Test
+    fun `a cancellation cursor older than the latest revision cancels nothing`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val cancel = cancellation(alice, event)
+        val revision = calendarEvent(alice, "d1", "Standup v2", createdAt = 200)
+
+        val index = CordnAnnotationIndex.of(listOf(event, cancel, revision))
+
+        assertTrue(!index.isCancelled(revision.envelope.id))
+        assertTrue(index.isHidden(event.envelope.id))
+    }
 }
