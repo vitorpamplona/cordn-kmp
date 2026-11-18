@@ -86,6 +86,16 @@ object CordnCalendar {
         return coordinate(eventKind, author, parts[2])
     }
 
+    /**
+     * What a chat row says for a calendar event: its `title`, else its NIP-31 `alt`, else its
+     * `content` (§3: the description). Never blank for an event that has any of them, which a
+     * row rendering `content` alone was for every cordn-web event.
+     */
+    fun titleOf(envelope: CordnEnvelope): String =
+        envelope.tags.tagValue("title")?.takeIf { it.isNotBlank() }
+            ?: envelope.tags.tagValue("alt")?.takeIf { it.isNotBlank() }
+            ?: envelope.content
+
     /** Folds a group's whole stream. Order-independent: ranks come from `created_at` and cursors. */
     fun fold(messages: List<CordnDeliveredMessage>): Fold {
         val latest = mutableMapOf<String, CordnDeliveredMessage>()

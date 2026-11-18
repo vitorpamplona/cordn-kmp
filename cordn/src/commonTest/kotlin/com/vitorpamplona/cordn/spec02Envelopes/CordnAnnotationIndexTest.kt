@@ -418,4 +418,11 @@ class CordnAnnotationIndexTest {
         assertTrue(!index.isCancelled(revision.envelope.id))
         assertTrue(index.isHidden(event.envelope.id))
     }
+
+    @Test
+    fun `a calendar row reads its title, then its alt`() {
+        assertEquals("Standup", CordnCalendar.titleOf(calendarEvent(alice, "d1", "Standup", createdAt = 1).envelope))
+        val untitled = message(alice, CordnMessageKinds.CALENDAR_DATE, "desc", arrayOf(arrayOf("d", "x"), arrayOf("alt", "Calendar event: Trip")))
+        assertEquals("Calendar event: Trip", CordnCalendar.titleOf(untitled.envelope))
+    }
 }
