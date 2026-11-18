@@ -97,7 +97,7 @@ class CordnGroupSync(
             if (page.isEmpty()) return delivered
 
             val before = gids.associateWith { inbox(it).cursor.lastCursor }
-            page.forEach { message -> onMessage(message.gid, inbox(message.gid).accept(message)) }
+            page.forEach { message -> deliver(message, onMessage) }
             delivered += page.size
 
             // A page that moved no cursor means the coordinator is serving the
@@ -125,8 +125,18 @@ class CordnGroupSync(
             cursors = gids.associateWith { inbox(it).cursor.afterOrNull() },
             timeoutMs = timeoutMs,
         ) { message ->
-            onMessage(message.gid, inbox(message.gid).accept(message))
+            deliver(message, onMessage)
         }
+    }
+
+    /** Classifies [message] and hands it on, unless it is one this group has already passed. */
+    private fun deliver(
+        message: GroupMessage,
+        onMessage: (String, Ingestion) -> Unit,
+    ) {
+        val inbox = inbox(message.gid)
+        if (inbox.hasPassed(message)) return
+        onMessage(message.gid, inbox.accept(message))
     }
 
     /**
@@ -160,9 +170,30 @@ class CordnGroupSync(
         // deliver the echo while `postMessage` is still awaiting its own
         // response. Registering afterwards leaves a window in which our own
         // Commit looks like a stranger's and gets applied twice.
-        inbox(gid).expectEcho(PendingEpochOperation(sealedBase64, localStateApplied))
-        return client.postMessage(gid, sealedBase64)
+        expectCommitEcho(gid, PendingEpochOperation(sealedBase64, localStateApplied))
+        return postRegisteredCommit(gid, sealedBase64)
     }
+
+    /**
+     * The first half of [postCommit]: records [operation] so its echo is recognised.
+     *
+     * Split out so a caller can persist the record, and the staged Commit beside it, before the
+     * Commit goes on the wire (`multi-device.md` §10.5: durability before visibility). A crash
+     * after the post and before a write would otherwise leave a Commit on the stream that this
+     * device neither recognises nor can apply.
+     */
+    fun expectCommitEcho(
+        gid: String,
+        operation: PendingEpochOperation,
+    ) {
+        inbox(gid).expectEcho(operation)
+    }
+
+    /** The second half of [postCommit], for a Commit [expectCommitEcho] registered. */
+    suspend fun postRegisteredCommit(
+        gid: String,
+        sealedBase64: String,
+    ): PostedMessage = client.postMessage(gid, sealedBase64)
 
     /** Groups with a Commit posted but not yet seen coming back. */
     fun unconfirmed(): Map<String, List<PendingEpochOperation>> = inboxes.mapValues { it.value.pending() }.filterValues { it.isNotEmpty() }

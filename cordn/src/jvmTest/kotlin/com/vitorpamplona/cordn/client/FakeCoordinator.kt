@@ -65,6 +65,7 @@ class FakeCoordinator(
             it.welcomes = welcomes
             it.streams = streams
             it.joinRequests = joinRequests
+            it.sequence = sequence
         }
 
     class StoredKeyPackage(
@@ -95,11 +96,36 @@ class FakeCoordinator(
     /** Every method name called, in order. */
     val calls = mutableListOf<String>()
 
-    private var cursor = 0L
+    /** The coordinator's cursor, shared by every [viewAs] of it as the real one's is. */
+    class Sequence {
+        var cursor = 0L
+    }
+
+    private var sequence = Sequence()
     private var clock = 1_757_000_000L
 
     /** Fails the next [failNext] calls, to exercise the health surface. */
     var failNext = 0
+
+    /** Fails the next `msg_post` without storing it: the post never landed. */
+    var failNextPost = false
+
+    /** Stores the next `msg_post` and then fails it: it landed, and the answer was lost. */
+    var storeThenFailNextPost = false
+
+    /**
+     * Runs once, inside the next `msg_post`, before its cursor is assigned: what somebody else
+     * posting at that moment looks like, so their message is sequenced first.
+     */
+    var beforeNextPost: (suspend () -> Unit)? = null
+
+    /** Appends [sealedBase64] to [gid]'s stream as if somebody posted it. */
+    fun inject(
+        gid: String,
+        sealedBase64: String,
+    ) {
+        streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, ++sequence.cursor, sealedBase64, clock++)
+    }
 
     /** Pre-loads a KeyPackage as if its owner had published it. */
     fun seedKeyPackage(stored: StoredKeyPackage) {
@@ -202,10 +228,22 @@ class FakeCoordinator(
         sealedBase64: String,
     ): PostedMessage {
         record("msg_post")
+        beforeNextPost?.let {
+            beforeNextPost = null
+            it()
+        }
+        if (failNextPost) {
+            failNextPost = false
+            throw IllegalStateException("msg_post failed")
+        }
         // Monotonic across the whole coordinator, which is stricter than
         // spec/00.md §4 requires (per group) and so a safe stand-in.
-        val assigned = ++cursor
+        val assigned = ++sequence.cursor
         streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, assigned, sealedBase64, clock++)
+        if (storeThenFailNextPost) {
+            storeThenFailNextPost = false
+            throw IllegalStateException("msg_post timed out")
+        }
         return PostedMessage(gid, assigned, clock)
     }
 

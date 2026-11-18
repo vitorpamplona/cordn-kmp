@@ -20,6 +20,8 @@
  */
 package com.vitorpamplona.cordn.spec02Envelopes
 
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -56,6 +58,9 @@ object CordnDeliveredMessageCodec {
     private const val CURSOR = "c"
     private const val ENVELOPE = "e"
 
+    /** The carrying epoch's media key, hex. Optional: older entries do not have it, and older readers ignore it. */
+    private const val MEDIA_KEY = "mk"
+
     fun encode(message: CordnDeliveredMessage): String =
         Json.encodeToString(
             JsonObject.serializer(),
@@ -63,6 +68,7 @@ object CordnDeliveredMessageCodec {
                 put(V, VERSION)
                 put(CURSOR, message.cursor)
                 put(ENVELOPE, message.envelope.toJsonObject())
+                message.mediaKey?.let { put(MEDIA_KEY, it.toHexKey()) }
             },
         )
 
@@ -91,7 +97,11 @@ object CordnDeliveredMessageCodec {
             json[ENVELOPE]?.jsonObject
                 ?: throw IllegalArgumentException("a stored cordn message is missing `$ENVELOPE`")
 
-        return CordnDeliveredMessage(CordnEnvelope.fromJsonObject(envelope), cursor)
+        // A key that does not read is dropped rather than failing the entry: the
+        // message is still worth showing, and only its attachments fall back.
+        val mediaKey = json[MEDIA_KEY]?.jsonPrimitive?.content?.let { runCatching { it.hexToByteArray() }.getOrNull() }
+
+        return CordnDeliveredMessage(CordnEnvelope.fromJsonObject(envelope), cursor, mediaKey)
     }
 
     /**

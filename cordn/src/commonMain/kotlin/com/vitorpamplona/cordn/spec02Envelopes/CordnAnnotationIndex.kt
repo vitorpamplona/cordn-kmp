@@ -32,7 +32,27 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
 data class CordnDeliveredMessage(
     val envelope: CordnEnvelope,
     val cursor: Long,
-)
+    /**
+     * The encrypted-media key of the epoch that carried this message, or null for a message
+     * stored before it was kept.
+     *
+     * `encrypted-media.md` §7 step 5: an attachment opens under the key of its carrying
+     * message's epoch, not the group's current one. Captured at ingest, while that epoch is
+     * still held, because MLS forgets an epoch's exporter a few commits later; without it,
+     * every attachment older than the last Commit (an add, a rename) failed to open. Kept with
+     * the message, so it is encrypted at rest with it.
+     */
+    val mediaKey: ByteArray? = null,
+) {
+    // By content: a data class compares a ByteArray by reference.
+    override fun equals(other: Any?): Boolean =
+        other is CordnDeliveredMessage &&
+            envelope == other.envelope &&
+            cursor == other.cursor &&
+            (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
+
+    override fun hashCode(): Int = 31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
+}
 
 /**
  * Reactions, edits, deletions and pins folded onto the messages they modify.

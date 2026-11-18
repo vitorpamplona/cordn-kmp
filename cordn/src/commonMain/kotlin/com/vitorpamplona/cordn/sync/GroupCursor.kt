@@ -84,6 +84,8 @@ sealed interface Ingestion {
     data class SelfEchoUnapplied(
         override val cursor: Long,
         val sealedBase64: String,
+        /** The Welcomes to store once the Commit is confirmed ours. See [PendingEpochOperation.welcomes]. */
+        val welcomes: List<DeferredWelcome> = emptyList(),
     ) : Ingestion
 
     /** An application message we sent. Already in our own history. */
@@ -111,9 +113,24 @@ data class PendingEpochOperation(
     val sealedBase64: String,
     /**
      * False when we posted but had not yet adopted the post-Commit state —
-     * the case [Ingestion.SelfEchoUnapplied] exists for.
+     * the case [Ingestion.SelfEchoUnapplied] exists for, and since commits are
+     * staged until their echo confirms them, the case for every new one.
      */
     val localStateApplied: Boolean = true,
+    /**
+     * The Welcomes this Commit owes, stored only once the Commit is confirmed:
+     * a Commit that lost the epoch to somebody else's created a branch nobody
+     * is on, and a Welcome into it is an invitation nobody can use
+     * (`multi-device.md` §10.5, cordn-web 0.5.3).
+     */
+    val welcomes: List<DeferredWelcome> = emptyList(),
+)
+
+/** A Welcome waiting for its Commit to be confirmed. */
+data class DeferredWelcome(
+    val targetPubKey: String,
+    val keyPackageRef: String,
+    val welcomeBase64: String,
 )
 
 /**
@@ -131,6 +148,33 @@ class GroupInbox(
 ) {
     private val pendingOperations = echoes.pendingCommits.associateByTo(mutableMapOf()) { it.sealedBase64 }
     private val ownMessageCursors = echoes.ownMessageCursors.toMutableSet()
+
+    /**
+     * Payloads in a row that no key we hold opened, since the last one sealed for our current
+     * epoch. See [EchoState.unopenable].
+     */
+    var unopenable: Int = echoes.unopenable
+        private set
+
+    /** A payload opened under none of our keys: evidence, not proof, that we are behind. */
+    fun noteUnopenable() {
+        unopenable++
+    }
+
+    /** A payload sealed for our current epoch: proof that we are on the group's line. */
+    fun noteCurrentEpochReadable() {
+        unopenable = 0
+    }
+
+    /**
+     * Whether [message] is one this inbox has already passed.
+     *
+     * The coordinator's cursor is monotonic per group, so anything at or below where we have
+     * read to is a repeat: the tail of a catch-up meeting the head of a subscription, or two
+     * catch-ups racing. Processing a repeat is not harmless: its ratchet generation is spent,
+     * so it fails to open and reads as a gap, or as evidence that we fell behind.
+     */
+    fun hasPassed(message: GroupMessage): Boolean = cursor.fetchCursor > 0 && message.cursor <= cursor.fetchCursor
 
     /** Records a Commit we just posted, so its echo is recognised. */
     fun expectEcho(operation: PendingEpochOperation) {
@@ -161,7 +205,7 @@ class GroupInbox(
             return if (pending.localStateApplied) {
                 Ingestion.SelfEchoConfirmed(message.cursor, message.sealedBase64)
             } else {
-                Ingestion.SelfEchoUnapplied(message.cursor, message.sealedBase64)
+                Ingestion.SelfEchoUnapplied(message.cursor, message.sealedBase64, pending.welcomes)
             }
         }
 
@@ -202,6 +246,7 @@ class GroupInbox(
         EchoState(
             pendingCommits = pendingOperations.values.toList(),
             ownMessageCursors = ownMessageCursors.filter { it > cursor.fetchCursor }.sorted(),
+            unopenable = unopenable,
         )
 }
 
@@ -228,6 +273,16 @@ class GroupInbox(
 data class EchoState(
     val pendingCommits: List<PendingEpochOperation> = emptyList(),
     val ownMessageCursors: List<Long> = emptyList(),
+    /**
+     * Payloads in a row that opened under none of our keys, since the last one sealed for our
+     * current epoch.
+     *
+     * Nonzero means this device may have missed a Commit, so a Commit staged from here could
+     * split the group (cordn-web's `staleMark`, `multi-device.md` §10.5 "a stale view stages
+     * nothing"). Durable because the cursor that walked past those payloads is: forgetting the
+     * evidence at a restart would not make it any less true.
+     */
+    val unopenable: Int = 0,
 ) {
-    val isEmpty: Boolean get() = pendingCommits.isEmpty() && ownMessageCursors.isEmpty()
+    val isEmpty: Boolean get() = pendingCommits.isEmpty() && ownMessageCursors.isEmpty() && unopenable == 0
 }

@@ -22,6 +22,7 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessageCodec
+import com.vitorpamplona.cordn.sync.DeferredWelcome
 import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.cordn.sync.PendingEpochOperation
@@ -251,7 +252,14 @@ object CordnRoomStateCodec {
  * version:u16
  * pending_commits: vector2 of { sealed:opaque2, applied:u8 }
  * own_cursors: vector2 of u64
+ * -- trailing, absent from what older versions wrote --
+ * unopenable: u32
+ * deferred_welcomes: vector4 of { sealed:opaque2, welcomes: vector4 of { target:opaque2, kp_ref:opaque2, welcome:opaque4 } }
  * ```
+ *
+ * The trailing section is how the format grows without a version bump: an older reader stops
+ * after `own_cursors` and never sees it, and a newer reader treats its absence as zero and none.
+ * A version bump would instead make every older reader see an empty record.
  *
  * Empty on anything unreadable, which is the safe direction: losing the record
  * costs a client one run of reporting its own traffic as a gap, while
@@ -276,6 +284,21 @@ object EchoStateCodec {
         state.ownMessageCursors.forEach { cursors.putUint64(it) }
         writer.putOpaque2(cursors.toByteArray())
 
+        writer.putUint32(state.unopenable.toLong())
+
+        val deferred = TlsWriter()
+        state.pendingCommits.filter { it.welcomes.isNotEmpty() }.forEach { commit ->
+            deferred.putOpaque2(commit.sealedBase64.encodeToByteArray())
+            val welcomes = TlsWriter()
+            commit.welcomes.forEach {
+                welcomes.putOpaque2(it.targetPubKey.encodeToByteArray())
+                welcomes.putOpaque2(it.keyPackageRef.encodeToByteArray())
+                welcomes.putOpaque4(it.welcomeBase64.encodeToByteArray())
+            }
+            deferred.putOpaque4(welcomes.toByteArray())
+        }
+        writer.putOpaque4(deferred.toByteArray())
+
         return writer.toByteArray()
     }
 
@@ -298,7 +321,32 @@ object EchoStateCodec {
                     own += cursors.readUint64()
                 }
 
-                EchoState(pending, own)
+                var unopenable = 0
+                val welcomesBySealed = mutableMapOf<String, List<DeferredWelcome>>()
+                if (reader.hasRemaining) {
+                    unopenable = reader.readUint32().toInt()
+                    val deferred = TlsReader(reader.readOpaque4())
+                    while (deferred.hasRemaining) {
+                        val sealed = deferred.readOpaque2().decodeToString()
+                        val welcomes = TlsReader(deferred.readOpaque4())
+                        val list = mutableListOf<DeferredWelcome>()
+                        while (welcomes.hasRemaining) {
+                            list +=
+                                DeferredWelcome(
+                                    targetPubKey = welcomes.readOpaque2().decodeToString(),
+                                    keyPackageRef = welcomes.readOpaque2().decodeToString(),
+                                    welcomeBase64 = welcomes.readOpaque4().decodeToString(),
+                                )
+                        }
+                        welcomesBySealed[sealed] = list
+                    }
+                }
+
+                EchoState(
+                    pendingCommits = pending.map { it.copy(welcomes = welcomesBySealed[it.sealedBase64].orEmpty()) },
+                    ownMessageCursors = own,
+                    unopenable = unopenable,
+                )
             }
         } catch (e: Exception) {
             EchoState()
