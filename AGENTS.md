@@ -1,11 +1,10 @@
 # cordn KMP
 
 cordn (MLS group messaging whose delivery service is an MCP server reached over Nostr, rather than
-relays) as a Kotlin Multiplatform library for JVM, Android, iOS, macOS and Linux, published as
-`com.vitorpamplona.cordn:cordn` on Nostr + Blossom through
-[Magpie](https://github.com/vitorpamplona/magpie) (Maven Central up to 1.2.1). It is built on
-[Quartz](https://github.com/vitorpamplona/quartz) (events, signers, NIP-44 and `contextvm`, MCP over
-Nostr) and the RFC 9420 engine [mls-kmp](https://github.com/vitorpamplona/mls-kmp), and is used by
+relays) as a Kotlin Multiplatform library for JVM, Android, iOS, macOS and Linux, published to Maven
+Central as `com.vitorpamplona.cordn:cordn`. It is built on [Quartz](https://github.com/vitorpamplona/quartz)
+(events, signers, NIP-44 and `contextvm`, MCP over Nostr) and the RFC 9420 engine
+[mls-kmp](https://github.com/vitorpamplona/mls-kmp), and is used by
 [Amethyst](https://github.com/vitorpamplona/amethyst), its desktop app and the `amy` CLI.
 
 The code was the `com.vitorpamplona.quartz.cordn` package of Quartz, plus the headless group client
@@ -126,7 +125,6 @@ asks, and before opening, revising or merging one by either path, use the `ngit-
 
 Release Quartz first if this version needs a new one. Bump `VERSION_NAME` in `gradle.properties`,
 then push a `v<version>` tag. `create-release.yml` refuses to publish against an unpublished Quartz,
-runs the Apple tests on macOS, then the checks, publishes to Nostr + Blossom with Magpie's
-`publishToNostr` and opens the GitHub release. It needs `MAGPIE_BUNKER`, a NIP-46 `bunker://` URI
-for the release key that `vitorpamplona.com/.well-known/nostr.json` names as `releases`; the signer
-approves the release, and a version already on Nostr fails the job.
+runs the Apple tests on macOS, then the checks, publishes to Maven Central and opens the GitHub
+release. It needs `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_PRIVATE_KEY` and
+`SIGNING_PASSWORD`, the same secrets as Quartz.
