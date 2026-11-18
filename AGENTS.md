@@ -59,7 +59,8 @@ checked against ts-mls through Staircase fixtures (`src/commonTest/resources/tsm
 - `commonMain` and `commonTest` stay free of JVM-only APIs; `verifyKmpPurity` and the metadata
   compiles catch most of it on Linux, CI's `test-apple` job the rest. Use `kotlin.concurrent.Volatile`
   and Quartz's `PlatformLock`/`ConcurrentMap`.
-- JVM target is 17. Releases follow semantic versioning; Amethyst pins a version.
+- JVM target is 21, as Quartz's: Kotlin will not inline functions built for 21 into older
+  bytecode. Releases follow semantic versioning; Amethyst pins a version.
 - Commits: conventional commits (`feat:`, `fix:`, …). Never `--no-verify`.
 
 ## Verify, don't guess
