@@ -149,4 +149,27 @@ class GroupInboxTest {
         assertIs<Ingestion.OwnMessage>(inbox.accept(sent))
         assertTrue(inbox.pending().isEmpty())
     }
+
+    @Test
+    fun aMessageAtOrBelowTheCursorHasBeenPassed() {
+        // The tail of a catch-up meeting the head of a subscription: the
+        // second copy's ratchet generation is spent, so processing it again
+        // would read as a gap, or as evidence that we fell behind.
+        val inbox = GroupInbox()
+        val first = msg("Zmlyc3Q=")
+        assertTrue(!inbox.hasPassed(first))
+        inbox.accept(first)
+        assertTrue(inbox.hasPassed(first))
+        assertTrue(!inbox.hasPassed(msg("c2Vjb25k")))
+    }
+
+    @Test
+    fun theUnopenableCountSurvivesAsEchoState() {
+        val inbox = GroupInbox()
+        inbox.noteUnopenable()
+        inbox.noteUnopenable()
+        assertEquals(2, GroupInbox(echoes = inbox.echoes()).unopenable)
+        inbox.noteCurrentEpochReadable()
+        assertEquals(0, inbox.echoes().unopenable)
+    }
 }

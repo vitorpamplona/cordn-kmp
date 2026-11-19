@@ -25,6 +25,7 @@ import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.random.RandomInstance
 import com.vitorpamplona.crypto.sha2.sha256
 import com.vitorpamplona.mls.group.MlsGroup
+import com.vitorpamplona.mls.schedule.KeySchedule
 
 /**
  * cordn's encrypted-media codec.
@@ -58,10 +59,11 @@ import com.vitorpamplona.mls.group.MlsGroup
  * automatically with each MLS epoch advance, inheriting the forward-secrecy
  * and post-compromise-security properties of the group". Since
  * `exporterSecret` answers only for the epoch the group is on now, media from
- * an earlier epoch cannot currently be re-opened. Keeping old media readable
- * is a matter of caching the derived key per epoch locally, which changes
- * nothing on the wire — unlike the previous approach, which changed the wire
- * and broke every other client.
+ * an earlier epoch could not be re-opened at first. Keeping old media readable
+ * is a matter of keeping the derived key with each message (see [mediaKeyAt]
+ * and `CordnDeliveredMessage.mediaKey`), which changes nothing on the wire —
+ * unlike the previous approach, which changed the wire and broke every other
+ * client.
  */
 object CordnMediaEncryption {
     const val KEY_LENGTH = 32
@@ -87,6 +89,27 @@ object CordnMediaEncryption {
      * a single Amethyst attachment, and rendered each as an empty bubble.
      */
     fun mediaKey(group: MlsGroup): ByteArray = CordnGroupPolicy.MEDIA_EXPORTER.let { group.exporterSecret(it.label, it.context, it.length) }
+
+    /**
+     * The media key of [epoch], while [group] still holds it: the current epoch, or one of the
+     * former epochs MLS retains. Null once it is gone.
+     *
+     * `encrypted-media.md` §7 step 5 derives an attachment's key "from the epoch of the carrying
+     * group message", so a message read from a former epoch (a sender one Commit behind) carries
+     * that epoch's key, not ours. Callers capture it at ingest and keep it with the message
+     * (`CordnDeliveredMessage.mediaKey`), because the epoch will not be held for long.
+     */
+    fun mediaKeyAt(
+        group: MlsGroup,
+        epoch: Long,
+    ): ByteArray? =
+        if (epoch == group.epoch) {
+            mediaKey(group)
+        } else {
+            group.formerExporterSecrets()[epoch]?.let { exporter ->
+                CordnGroupPolicy.MEDIA_EXPORTER.let { KeySchedule.mlsExporter(exporter, it.label, it.context, it.length) }
+            }
+        }
 
     /**
      * Seals [plaintext] for [group] the way every cordn sender must: under the media key of the

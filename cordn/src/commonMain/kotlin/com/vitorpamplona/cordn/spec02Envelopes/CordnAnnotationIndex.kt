@@ -32,7 +32,27 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
 data class CordnDeliveredMessage(
     val envelope: CordnEnvelope,
     val cursor: Long,
-)
+    /**
+     * The encrypted-media key of the epoch that carried this message, or null for a message
+     * stored before it was kept.
+     *
+     * `encrypted-media.md` §7 step 5: an attachment opens under the key of its carrying
+     * message's epoch, not the group's current one. Captured at ingest, while that epoch is
+     * still held, because MLS forgets an epoch's exporter a few commits later; without it,
+     * every attachment older than the last Commit (an add, a rename) failed to open. Kept with
+     * the message, so it is encrypted at rest with it.
+     */
+    val mediaKey: ByteArray? = null,
+) {
+    // By content: a data class compares a ByteArray by reference.
+    override fun equals(other: Any?): Boolean =
+        other is CordnDeliveredMessage &&
+            envelope == other.envelope &&
+            cursor == other.cursor &&
+            (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
+
+    override fun hashCode(): Int = 31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
+}
 
 /**
  * Reactions, edits, deletions and pins folded onto the messages they modify.
@@ -73,6 +93,14 @@ class CordnAnnotationIndex private constructor(
     val deleted: Set<HexKey>,
     /** target id → the winning pin op. Only `ADD` entries are actually pinned. */
     val pins: Map<HexKey, PinState>,
+    /** Calendar revisions a newer one replaced: suppressed, not deleted (`calendar-events.md` §5). */
+    val supersededRevisions: Set<HexKey>,
+    /** Latest calendar revisions that replaced an earlier one, for an "edited" marker. */
+    val revisedEvents: Set<HexKey>,
+    /** Latest calendar revisions their author cancelled (§6): a cancelled card, not a deleted row. */
+    val cancelledEvents: Set<HexKey>,
+    /** Calendar events that fail §3–§4 validation (§4: an "unsupported event" placeholder). */
+    val unsupportedEvents: Set<HexKey> = emptySet(),
 ) {
     /** Who pinned a message and when, kept so a pin list can be ordered. */
     data class PinState(
@@ -92,6 +120,21 @@ class CordnAnnotationIndex private constructor(
 
     fun isPinned(id: HexKey): Boolean = pins[id]?.op == CordnMessageReferences.PinOp.ADD
 
+    /**
+     * Whether [id] gets no row of its own: a stream-hidden kind (an annotation, a poll vote, an
+     * RSVP; see [CordnMessageKinds.isStreamHidden]) or a calendar revision a newer one replaced.
+     */
+    fun isHidden(id: HexKey): Boolean = id in supersededRevisions || byId[id]?.let { CordnMessageKinds.isStreamHidden(it.envelope.kind) } == true
+
+    /** Whether [id] is the latest revision of a calendar event that had earlier ones. */
+    fun isRevised(id: HexKey): Boolean = id in revisedEvents
+
+    /** Whether [id] is a calendar event its author cancelled. Not [isDeleted]: §6 shows it. */
+    fun isCancelled(id: HexKey): Boolean = id in cancelledEvents
+
+    /** Whether [id] is a calendar event no client may project (§4): show "unsupported event". */
+    fun isUnsupportedEvent(id: HexKey): Boolean = id in unsupportedEvents
+
     /** Currently pinned targets, newest pin first. */
     fun pinnedIds(): List<HexKey> =
         pins.values
@@ -103,15 +146,40 @@ class CordnAnnotationIndex private constructor(
         /**
          * Folds [messages] — a whole group's stream, annotations included.
          *
-         * Four passes, and the order matters exactly once: deletions before
-         * edits, so a withdrawn message cannot be edited back into existence.
-         * The rest are independent.
+         * Deletions come first and the order is load-bearing twice: a withdrawn
+         * message cannot be edited back into existence, and a deleted reaction
+         * (cordn-web's "remove your reaction": a kind 5 naming the kind 7) no
+         * longer counts. The rest are independent.
          */
         fun of(messages: List<CordnDeliveredMessage>): CordnAnnotationIndex {
             val byId = messages.associateBy { it.envelope.id }
 
+            val deleted = mutableSetOf<HexKey>()
+            messages.forEach { message ->
+                val ref = CordnMessageReferences.delete(message.envelope.kind, message.envelope.tags) ?: return@forEach
+                val target = byId[ref.targetId] ?: return@forEach
+                // A calendar cancellation's `e` names the revision it cancels, and §6 shows a
+                // cancelled card for that rather than "message deleted": the calendar fold
+                // decides it. Any other `e` it carries is an ordinary deletion, as cordn-web's
+                // fold makes it.
+                if (CordnCalendar.cancelledCoordinate(message.envelope.kind, message.envelope.tags) != null &&
+                    CordnCalendar.coordinateOf(target) != null
+                ) {
+                    return@forEach
+                }
+                // A `k` that disagrees with the stored message is a mismatch.
+                if (ref.targetKind != target.envelope.kind) return@forEach
+                // Author-only. The pubkeys are MLS-authenticated, not claimed.
+                if (target.envelope.pubKey != message.envelope.pubKey) return@forEach
+                deleted.add(ref.targetId)
+            }
+
+            // A set of senders per emoji, built from the reactions still live:
+            // an account that reacted from two devices and removed one of them
+            // still has the other, so it keeps its place under the chip.
             val reactions = mutableMapOf<HexKey, MutableMap<String, MutableSet<HexKey>>>()
             messages.forEach { message ->
+                if (message.envelope.id in deleted) return@forEach
                 val ref =
                     CordnMessageReferences.reaction(
                         message.envelope.kind,
@@ -122,17 +190,6 @@ class CordnAnnotationIndex private constructor(
                     .getOrPut(ref.targetId) { mutableMapOf() }
                     .getOrPut(ref.reaction) { mutableSetOf() }
                     .add(message.envelope.pubKey)
-            }
-
-            val deleted = mutableSetOf<HexKey>()
-            messages.forEach { message ->
-                val ref = CordnMessageReferences.delete(message.envelope.kind, message.envelope.tags) ?: return@forEach
-                val target = byId[ref.targetId] ?: return@forEach
-                // A `k` that disagrees with the stored message is a mismatch.
-                if (ref.targetKind != target.envelope.kind) return@forEach
-                // Author-only. The pubkeys are MLS-authenticated, not claimed.
-                if (target.envelope.pubKey != message.envelope.pubKey) return@forEach
-                deleted.add(ref.targetId)
             }
 
             val edits = mutableMapOf<HexKey, CordnDeliveredMessage>()
@@ -179,7 +236,19 @@ class CordnAnnotationIndex private constructor(
                 }
             }
 
-            return CordnAnnotationIndex(byId, reactions, edits, deleted, pins)
+            val calendar = CordnCalendar.fold(messages)
+
+            return CordnAnnotationIndex(
+                byId = byId,
+                reactions = reactions,
+                edits = edits,
+                deleted = deleted,
+                pins = pins,
+                supersededRevisions = calendar.superseded,
+                revisedEvents = calendar.revised,
+                cancelledEvents = calendar.cancelled,
+                unsupportedEvents = calendar.invalid,
+            )
         }
     }
 }

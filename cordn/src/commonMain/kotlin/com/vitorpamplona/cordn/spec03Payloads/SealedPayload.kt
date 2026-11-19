@@ -24,6 +24,7 @@ import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.random.RandomInstance
 import com.vitorpamplona.mls.group.MlsGroup
+import com.vitorpamplona.mls.schedule.KeySchedule
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -76,17 +77,28 @@ object SealedPayload {
     }
 
     /** Opens a sealed payload, or throws if it is malformed or fails AEAD verification. */
-    @OptIn(ExperimentalEncodingApi::class)
     fun open(
         sealedBase64: String,
         key: ByteArray,
+    ): ByteArray = open(decode(sealedBase64), key)
+
+    /**
+     * The bytes of a sealed payload, for trying several keys on one payload with the other
+     * [open] without decoding it again for each.
+     */
+    @OptIn(ExperimentalEncodingApi::class)
+    fun decode(sealedBase64: String): ByteArray =
+        try {
+            Base64.decode(sealedBase64)
+        } catch (e: IllegalArgumentException) {
+            throw IllegalArgumentException("cordn sealed payload is not valid base64", e)
+        }
+
+    /** Opens a payload [decode] returned, or throws if it is malformed or fails AEAD verification. */
+    fun open(
+        payload: ByteArray,
+        key: ByteArray,
     ): ByteArray {
-        val payload =
-            try {
-                Base64.decode(sealedBase64)
-            } catch (e: IllegalArgumentException) {
-                throw IllegalArgumentException("cordn sealed payload is not valid base64", e)
-            }
         require(payload.size >= MIN_SIZE) {
             "cordn sealed payload must be at least $MIN_SIZE bytes, was ${payload.size}"
         }
@@ -103,4 +115,21 @@ object SealedPayload {
      * (`spec/03.md` §5).
      */
     fun applicationKey(group: MlsGroup): ByteArray = CordnGroupPolicy.PAYLOAD_EXPORTER.let { group.exporterSecret(it.label, it.context, it.length) }
+
+    /**
+     * The payload keys of the former epochs [group] still retains, newest first, by epoch.
+     *
+     * `spec/03.md` §8 says the outer layer retains nothing, and both reference clients
+     * (cordn-web 0.5.2, Staircase) retain four epochs anyway, as the newer `multi-device.md`
+     * interop list asks: a sender who has not yet seen the latest Commit seals under the epoch
+     * it left, and an outer layer that forgets sooner than MLS does makes those messages
+     * permanently unopenable while MLS could still read them. The implementations win, so we
+     * keep what MLS keeps ([MlsGroup.RETAIN_EPOCHS]).
+     */
+    fun formerApplicationKeys(group: MlsGroup): List<Pair<Long, ByteArray>> =
+        group
+            .formerExporterSecrets()
+            .entries
+            .sortedByDescending { it.key }
+            .map { (epoch, exporter) -> epoch to CordnGroupPolicy.PAYLOAD_EXPORTER.let { KeySchedule.mlsExporter(exporter, it.label, it.context, it.length) } }
 }

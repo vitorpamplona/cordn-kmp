@@ -21,6 +21,7 @@
 package com.vitorpamplona.cordn.sync
 
 import com.vitorpamplona.cordn.spec00Coordinator.GroupMessage
+import kotlin.concurrent.Volatile
 
 /**
  * Where a group's catch-up has reached on one coordinator.
@@ -84,6 +85,8 @@ sealed interface Ingestion {
     data class SelfEchoUnapplied(
         override val cursor: Long,
         val sealedBase64: String,
+        /** The Welcomes to store once the Commit is confirmed ours. See [PendingEpochOperation.welcomes]. */
+        val welcomes: List<DeferredWelcome> = emptyList(),
     ) : Ingestion
 
     /** An application message we sent. Already in our own history. */
@@ -99,21 +102,70 @@ sealed interface Ingestion {
 }
 
 /**
- * A Commit we have posted and are waiting to see come back.
+ * A Commit we have posted and are waiting to see come back, and then what became of it.
  *
  * Keyed by the exact sealed base64, which is what makes the match reliable:
  * `spec/03.md` §4 requires a fresh random nonce per payload, so the sealed form
  * of a Commit is unique to the one posting of it. Matching on cursor instead
  * would break the moment a coordinator renumbered, and matching on the
  * plaintext would need us to decrypt our own traffic to recognise it.
+ *
+ * The record outlives the echo on purpose (cordn-web's op machine, `chatGroupProtocol.ts`): a
+ * Commit that was settled [Status.LOST] stays recognisable, so a late echo of it is never mistaken
+ * for somebody else's Commit, and a [Status.CONFIRMED] one keeps the Welcomes it still owes until
+ * the coordinator has them.
  */
 data class PendingEpochOperation(
     val sealedBase64: String,
     /**
      * False when we posted but had not yet adopted the post-Commit state —
-     * the case [Ingestion.SelfEchoUnapplied] exists for.
+     * the case [Ingestion.SelfEchoUnapplied] exists for, and since commits are
+     * staged until their echo confirms them, the case for every new one.
      */
     val localStateApplied: Boolean = true,
+    /**
+     * The Welcomes this Commit owes, stored only once the Commit is confirmed:
+     * a Commit that lost the epoch to somebody else's created a branch nobody
+     * is on, and a Welcome into it is an invitation nobody can use
+     * (`multi-device.md` §10.5, cordn-web 0.5.3). On a [Status.CONFIRMED] record these are the
+     * ones not yet stored; each leaves the list once `welcome_store` took it.
+     */
+    val welcomes: List<DeferredWelcome> = emptyList(),
+    /** What is known of the Commit's fate. */
+    val status: Status = Status.PENDING,
+    /** The epoch the Commit leaves, or null for a record written before it was kept. */
+    val fromEpoch: Long? = null,
+    /** The cursor its echo came back at, once it has; the Welcomes' `after`. */
+    val landedAt: Long? = null,
+) {
+    /** The record exactly as the 1.3.0 release built it. */
+    @Deprecated("Kept for binary compatibility", level = DeprecationLevel.HIDDEN)
+    constructor(sealedBase64: String, localStateApplied: Boolean) : this(sealedBase64, localStateApplied, emptyList())
+
+    enum class Status {
+        /** Posted, or about to be; its echo has not come back. */
+        PENDING,
+
+        /**
+         * It did not happen: another Commit took its epoch, or a stream read to the end did not
+         * hold it. Kept only so its echo, should it still arrive, is recognised as ours. It owes
+         * no Welcome.
+         */
+        LOST,
+
+        /** Its echo came back and it was applied. Owes [welcomes], when it has any left. */
+        CONFIRMED,
+    }
+
+    /** Still waiting for its echo. */
+    val isOutstanding: Boolean get() = status == Status.PENDING
+}
+
+/** A Welcome waiting for its Commit to be confirmed. */
+data class DeferredWelcome(
+    val targetPubKey: String,
+    val keyPackageRef: String,
+    val welcomeBase64: String,
 )
 
 /**
@@ -124,18 +176,75 @@ data class PendingEpochOperation(
  * arriving over `msg_sub_many` and the same message arriving over
  * `msg_fetch_many` must be treated identically, or a client that reconnects
  * mid-stream processes something twice.
+ *
+ * Not thread-safe: one caller at a time per group. `CordnGroupManager` holds the group's lock
+ * around every use.
  */
 class GroupInbox(
-    var cursor: GroupCursor = GroupCursor(),
+    cursor: GroupCursor = GroupCursor(),
     echoes: EchoState = EchoState(),
 ) {
-    private val pendingOperations = echoes.pendingCommits.associateByTo(mutableMapOf()) { it.sealedBase64 }
+    /** Where the stream has been read to. */
+    @Volatile
+    var cursor: GroupCursor = cursor
+
+    private val operations = echoes.pendingCommits.associateByTo(LinkedHashMap()) { it.sealedBase64 }
     private val ownMessageCursors = echoes.ownMessageCursors.toMutableSet()
+
+    /**
+     * The cursor last written to disk, which decides when a record of ours can go: a record
+     * dropped before the cursor that passed it was saved would be missing when a crash makes the
+     * stream deliver that entry again.
+     */
+    private var persistedCursor: Long = cursor.fetchCursor
+
+    /**
+     * Payloads in a row that no key we hold opened, since the last one sealed for our current
+     * epoch. See [EchoState.unopenable].
+     */
+    var unopenable: Int = echoes.unopenable
+        private set
+
+    /** A payload opened under none of our keys, or a Commit at our epoch that would not apply: evidence that we are behind. */
+    fun noteUnopenable() {
+        unopenable++
+    }
+
+    /** A payload sealed for our current epoch that MLS accepted: proof that we are on the group's line. */
+    fun noteCurrentEpochReadable() {
+        unopenable = 0
+    }
+
+    /**
+     * Whether [message] is one this inbox has already passed.
+     *
+     * The coordinator's cursor is monotonic per group, so anything at or below where we have
+     * read to is a repeat: the tail of a catch-up meeting the head of a subscription, or two
+     * catch-ups racing. Processing a repeat is not harmless: its ratchet generation is spent,
+     * so it fails to open and reads as a gap, or as evidence that we fell behind.
+     */
+    fun hasPassed(message: GroupMessage): Boolean = cursor.fetchCursor > 0 && message.cursor <= cursor.fetchCursor
 
     /** Records a Commit we just posted, so its echo is recognised. */
     fun expectEcho(operation: PendingEpochOperation) {
-        pendingOperations[operation.sealedBase64] = operation
+        operations[operation.sealedBase64] = operation
     }
+
+    /** The record of our Commit sealed as [sealedBase64], whatever its status. */
+    fun operation(sealedBase64: String): PendingEpochOperation? = operations[sealedBase64]
+
+    /** Replaces the record of [operation]'s Commit. */
+    fun update(operation: PendingEpochOperation) {
+        operations[operation.sealedBase64] = operation
+    }
+
+    /** Forgets the record of [sealedBase64]. */
+    fun forget(sealedBase64: String) {
+        operations.remove(sealedBase64)
+    }
+
+    /** Every record, in the order they were made. */
+    fun operations(): List<PendingEpochOperation> = operations.values.toList()
 
     /** Records an application message we sent, by the cursor the coordinator gave it. */
     fun recordOwnMessage(cursor: Long) {
@@ -143,7 +252,7 @@ class GroupInbox(
     }
 
     /** Pending Commits still unconfirmed. */
-    fun pending(): List<PendingEpochOperation> = pendingOperations.values.toList()
+    fun pending(): List<PendingEpochOperation> = operations.values.filter { it.isOutstanding }
 
     /**
      * Classifies [message] and advances the cursor.
@@ -151,17 +260,21 @@ class GroupInbox(
      * Advancing here rather than at each call site is the whole point: three of
      * the four outcomes do nothing else, and a caller that forgot one would
      * silently re-fetch forever.
+     *
+     * A Commit of ours that is still staged ([PendingEpochOperation.localStateApplied] false), or
+     * already settled, comes back as [Ingestion.SelfEchoUnapplied] and its record stays: what the
+     * echo means is for the caller to decide, who holds the MLS state, and to record with [update].
      */
     fun accept(message: GroupMessage): Ingestion {
         cursor = cursor.advancedTo(message.cursor)
 
-        val pending = pendingOperations[message.sealedBase64]
+        val pending = operations[message.sealedBase64]
         if (pending != null) {
-            pendingOperations.remove(message.sealedBase64)
-            return if (pending.localStateApplied) {
+            return if (pending.localStateApplied && pending.isOutstanding) {
+                operations.remove(message.sealedBase64)
                 Ingestion.SelfEchoConfirmed(message.cursor, message.sealedBase64)
             } else {
-                Ingestion.SelfEchoUnapplied(message.cursor, message.sealedBase64)
+                Ingestion.SelfEchoUnapplied(message.cursor, message.sealedBase64, pending.welcomes)
             }
         }
 
@@ -186,23 +299,62 @@ class GroupInbox(
         this.cursor = this.cursor.advancedTo(cursor)
     }
 
+    /** Records that [cursor] is now on disk. See [persistedCursor]. */
+    fun markPersisted(cursor: GroupCursor) {
+        persistedCursor = maxOf(persistedCursor, cursor.fetchCursor)
+    }
+
+    /**
+     * Drops the records of lost Commits that can no longer matter at [epoch]: those beyond the
+     * newest [MAX_RETAINED_LOST], and those more than [retainedEpochs] epochs back, whose echo no
+     * key we hold opens any more. Such an echo, should one still come, is then an ordinary
+     * payload.
+     */
+    fun pruneLost(
+        epoch: Long,
+        retainedEpochs: Int,
+    ) {
+        val lost = operations.values.filter { it.status == PendingEpochOperation.Status.LOST }
+        val excess = lost.size - MAX_RETAINED_LOST
+        lost.forEachIndexed { index, op ->
+            val tooOld = op.fromEpoch != null && epoch - op.fromEpoch > retainedEpochs
+            if (index < excess || tooOld) operations.remove(op.sealedBase64)
+        }
+    }
+
     /**
      * The bookkeeping to persist beside [cursor].
      *
-     * Own-message cursors at or below the fetch cursor are dropped: the stream
-     * has already delivered them, so they can never come round again, and
-     * keeping them would grow the record for the life of the group.
+     * Own-message cursors at or below the persisted cursor are dropped: the stream has already
+     * delivered them, so they can never come round again, and keeping them would grow the record
+     * for the life of the group. Settled Commits whose echo the persisted cursor has passed go
+     * too, unless they still owe a Welcome.
      *
      * Pending Commits are kept until their echo matches, however long that
      * takes, because the echo is the only copy that will ever be offered and
      * [Ingestion.SelfEchoUnapplied] is how a client that died mid-post applies
      * its own Commit.
      */
-    fun echoes(): EchoState =
-        EchoState(
-            pendingCommits = pendingOperations.values.toList(),
-            ownMessageCursors = ownMessageCursors.filter { it > cursor.fetchCursor }.sorted(),
+    fun echoes(): EchoState {
+        operations.values
+            .filter { op ->
+                op.status != PendingEpochOperation.Status.PENDING &&
+                    op.welcomes.isEmpty() &&
+                    op.landedAt != null &&
+                    op.landedAt <= persistedCursor
+            }.forEach { operations.remove(it.sealedBase64) }
+        ownMessageCursors.removeAll { it <= persistedCursor }
+        return EchoState(
+            pendingCommits = operations.values.toList(),
+            ownMessageCursors = ownMessageCursors.sorted(),
+            unopenable = unopenable,
         )
+    }
+
+    companion object {
+        /** How many lost Commits stay recognisable at most. */
+        const val MAX_RETAINED_LOST = 8
+    }
 }
 
 /**
@@ -228,6 +380,16 @@ class GroupInbox(
 data class EchoState(
     val pendingCommits: List<PendingEpochOperation> = emptyList(),
     val ownMessageCursors: List<Long> = emptyList(),
+    /**
+     * Payloads in a row that opened under none of our keys, since the last one sealed for our
+     * current epoch.
+     *
+     * Nonzero means this device may have missed a Commit, so a Commit staged from here could
+     * split the group (cordn-web's `staleMark`, `multi-device.md` §10.5 "a stale view stages
+     * nothing"). Durable because the cursor that walked past those payloads is: forgetting the
+     * evidence at a restart would not make it any less true.
+     */
+    val unopenable: Int = 0,
 ) {
-    val isEmpty: Boolean get() = pendingCommits.isEmpty() && ownMessageCursors.isEmpty()
+    val isEmpty: Boolean get() = pendingCommits.isEmpty() && ownMessageCursors.isEmpty() && unopenable == 0
 }

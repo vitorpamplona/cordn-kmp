@@ -59,6 +59,16 @@ data class CordnGroupMetadata(
     val icon: String = "",
     /** Advisory image URL, possibly a `data:` URL. Empty means absent. */
     val imageUrl: String = "",
+    /**
+     * Every byte after `image_url`, kept verbatim.
+     *
+     * `spec/01.md` §4: decoders SHOULD ignore unknown trailing fields, and a version bump is not
+     * how they arrive. The first one is `coordinator_routing` (upstream's coordinator-handoff
+     * draft, `@cordn/core` 0.6.0), which its encoders write on every metadata, empty or not. Kept
+     * rather than dropped because a metadata edit re-encodes the whole extension: [copy] carries
+     * these bytes over, so a rename here does not erase another client's routing for everyone.
+     */
+    val trailingFields: ByteArray = ByteArray(0),
 ) {
     init {
         adminPubkeys.forEach {
@@ -82,8 +92,32 @@ data class CordnGroupMetadata(
         writer.putOpaque2(adminPubkeys.fold(ByteArray(0)) { acc, key -> acc + key.hexToByteArray() })
         writer.putOpaque2(icon.encodeToByteArray())
         writer.putOpaque2(imageUrl.encodeToByteArray())
-        return writer.toByteArray()
+        return writer.toByteArray() + trailingFields
     }
+
+    // By content: a data class compares a ByteArray by reference.
+    override fun equals(other: Any?): Boolean =
+        other is CordnGroupMetadata &&
+            name == other.name &&
+            description == other.description &&
+            adminPubkeys == other.adminPubkeys &&
+            icon == other.icon &&
+            imageUrl == other.imageUrl &&
+            trailingFields.contentEquals(other.trailingFields)
+
+    override fun hashCode(): Int {
+        var result = name.hashCode()
+        result = 31 * result + description.hashCode()
+        result = 31 * result + adminPubkeys.hashCode()
+        result = 31 * result + icon.hashCode()
+        result = 31 * result + imageUrl.hashCode()
+        return 31 * result + trailingFields.contentHashCode()
+    }
+
+    // A data class prints a ByteArray as its reference, which says nothing in a log.
+    override fun toString(): String =
+        "CordnGroupMetadata(name=$name, description=$description, adminPubkeys=$adminPubkeys, icon=$icon, imageUrl=$imageUrl, " +
+            "trailingFields=${trailingFields.toHexKey()})"
 
     fun toExtension(): Extension = Extension(EXTENSION_TYPE, encode())
 
@@ -134,16 +168,21 @@ data class CordnGroupMetadata(
             val icon = reader.readOpaque2().decodeToStringStrict("icon")
             val imageUrl = reader.readOpaque2().decodeToStringStrict("image_url")
 
-            require(!reader.hasRemaining) { "unexpected trailing bytes in cordn group metadata" }
+            // Trailing fields are kept, not parsed and not refused (`spec/01.md` §4). Refusing them
+            // was the dangerous direction: CordnGroupPolicy reads metadata it cannot decode as
+            // naming no admins, so an administered group turned egalitarian here alone.
+            val trailing = reader.readBytes(reader.remaining)
             require(adminBytes.size % KEY_SIZE == 0) {
                 "cordn group metadata admin_pubkeys length must be a multiple of $KEY_SIZE, was ${adminBytes.size}"
             }
 
             val admins =
-                (0 until adminBytes.size / KEY_SIZE).map {
-                    adminBytes.copyOfRange(it * KEY_SIZE, (it + 1) * KEY_SIZE).toHexKey()
-                }
-            return CordnGroupMetadata(name, description, admins, icon, imageUrl)
+                (0 until adminBytes.size / KEY_SIZE)
+                    .map { adminBytes.copyOfRange(it * KEY_SIZE, (it + 1) * KEY_SIZE).toHexKey() }
+                    // Deduped, not refused, as upstream's decoder does: a repeat is harmless,
+                    // and a refusal would read the group as egalitarian (see above).
+                    .distinct()
+            return CordnGroupMetadata(name, description, admins, icon, imageUrl, trailing)
         }
 
         /** The group's metadata, or null when it carries none. */

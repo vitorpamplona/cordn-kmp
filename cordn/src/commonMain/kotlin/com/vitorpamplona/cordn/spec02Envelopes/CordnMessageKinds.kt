@@ -43,6 +43,8 @@ package com.vitorpamplona.cordn.spec02Envelopes
  * | Edit | **1010** | 1009 |
  * | Deletion | 5 | — |
  * | Pin | **1011** | — |
+ * | Poll / vote | 1068 / 1018 (NIP-88) | — |
+ * | Calendar event / RSVP | 31922, 31923 / 31925 (NIP-52) | — |
  * | System row | derived, never sent | 1210, on the wire |
  *
  * Worth asking upstream to write the last three down.
@@ -66,6 +68,24 @@ object CordnMessageKinds {
     /** Group-scoped pin/unpin, carrying an `op` tag. Not in any spec. */
     const val PIN = 1011
 
+    /** NIP-88 poll: the question in `content`, `option`/`polltype`/`endsAt` tags. cordn-web 0.6.0. */
+    const val POLL = 1068
+
+    /**
+     * NIP-88 vote on the poll its `e` tag names. The poll's sparse aggregate, never a row:
+     * its `content` ("Voted: …") is only a fallback for clients without polls.
+     */
+    const val POLL_RESPONSE = 1018
+
+    /** NIP-52 date-based (all-day) calendar event, addressable by `(kind, author, d)`. */
+    const val CALENDAR_DATE = 31922
+
+    /** NIP-52 time-based calendar event, addressable by `(kind, author, d)`. */
+    const val CALENDAR_TIME = 31923
+
+    /** NIP-52 RSVP: the event's sparse aggregate, never a row (`calendar-events.md` §7). */
+    const val CALENDAR_RSVP = 31925
+
     /**
      * A row derived from an MLS Commit — "X added Y", "the name changed".
      *
@@ -88,4 +108,15 @@ object CordnMessageKinds {
     fun isAnnotation(kind: Int): Boolean = kind == REACTION || kind == EDIT || kind == DELETION || kind == PIN
 
     fun isSystem(kind: Int): Boolean = kind == SYSTEM
+
+    /**
+     * Kinds that never render as a row in the stream, nor as a room's preview line: the
+     * annotations, plus the sparse aggregates of polls and calendar events (cordn-web's
+     * `isStreamHiddenKind`). A vote shown as a bubble reads "Voted: Pizza" from someone who
+     * never typed it.
+     */
+    fun isStreamHidden(kind: Int): Boolean = isAnnotation(kind) || kind == POLL_RESPONSE || kind == CALENDAR_RSVP
+
+    /** A NIP-52 calendar event, whose revisions replace each other (`calendar-events.md` §5). */
+    fun isCalendarEvent(kind: Int): Boolean = kind == CALENDAR_DATE || kind == CALENDAR_TIME
 }

@@ -3,7 +3,8 @@
 **cordn** — MLS group messaging whose delivery service is an MCP server reached
 over Nostr, rather than relays.
 
-Built from `Cordn-msg/cordn` at commit **`b465df0`**, read on 2026-09-18.
+Built from `Cordn-msg/cordn` at commit **`c07a83f`** and `Cordn-msg/cordn-web` at
+**`94422d7`** (v0.7.0), read on 2026-11-18 (`cordn/plans/2026-11-18-cordn-upstream-resync.md`).
 Where the prose and the reference implementation disagree, the implementation
 wins, because that is what is on the wire — each such case is noted below and
 in the KDoc of the code that implements it.
@@ -111,7 +112,10 @@ script pins `node --experimental-strip-types`.
    through the same stream as everyone else's traffic. Feeding it through MLS
    again advances the epoch twice, and nothing complains until messages stop
    decrypting several epochs later. Matching is on the sealed ciphertext, which
-   is unique per posting because the nonce is fresh (`spec/03.md` §4).
+   is unique per posting because the nonce is fresh (`spec/03.md` §4). Our own
+   Commits are *staged* until that echo comes back, so one that loses the race
+   to somebody else's Commit from the same epoch is discarded instead of
+   forking us onto a branch nobody follows (`multi-device.md` §10.5).
 
 4. **The cursor advances past messages you skip.** Including undecryptable
    ones. A message sealed under an epoch we never had is unreadable forever, so
@@ -154,7 +158,7 @@ partial:
 
 Plan §8 has the full analysis.
 
-## Three spec/implementation divergences found
+## Seven spec/implementation divergences found
 
 1. **`spec/01.md` §3 contradicts itself**: "MLS variable-length vector encoding
    conventions" and then `opaque Name<0..2^16-1>`, which are different
@@ -172,6 +176,28 @@ Plan §8 has the full analysis.
    (`kp_64 ?? keyPackageBase64`); so do we. Worth proposing upstream that
    publication gets its own payload or kind — it would also let a cordn
    KeyPackage be published to relays and consumed with no coordinator at all.
+4. **The outer seal retains former epochs, though `spec/03.md` §8 says it
+   retains nothing.** The newer `multi-device.md` interop list asks for
+   "envelope retention parity", and both reference clients (cordn-web 0.5.2,
+   Staircase) keep the payload keys of the last four epochs, so a message from a
+   member one Commit behind still opens. The implementations win;
+   `SealedPayload.formerApplicationKeys` follows them.
+5. **`cordn_group_metadata` must tolerate trailing fields.** `spec/01.md` §4 says
+   decoders ignore them, and the unmerged coordinator-handoff draft appends
+   `coordinator_routing` to every metadata it writes. We refused them, which read
+   an administered group as egalitarian. They are now kept and re-encoded.
+6. **A non-author's calendar cancellation masks the author's in cordn-web.**
+   `calendar-events.md` §6 says other members' cancellations are ignored;
+   cordn-web keeps the newest-cursor cancellation from anyone and only then
+   checks its author, so a later stray kind 5 un-cancels an event there and not
+   here. We follow the spec (`CordnCalendar.fold`); worth raising upstream.
+   Calendar validation (§3–§4) is otherwise cordn-web's, with one gap: it asks
+   `Intl` whether a `*_tzid` names a real zone, and we, with no zone database,
+   check only its shape.
+7. **A former-epoch message from a sender a later epoch removed is refused.**
+   cordn-web shows it. A removed member still holds the epoch they were removed
+   from and could keep posting into the group until four Commits later; the
+   retained epochs are for lagging senders, not departed ones.
 
 ## Testing
 

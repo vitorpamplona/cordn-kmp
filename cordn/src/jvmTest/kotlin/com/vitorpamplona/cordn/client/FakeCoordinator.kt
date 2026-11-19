@@ -32,6 +32,7 @@ import com.vitorpamplona.cordn.spec00Coordinator.PublishedKeyPackage
 import com.vitorpamplona.cordn.spec00Coordinator.TakenKeyPackage
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import kotlinx.coroutines.delay
 
 /**
  * A coordinator that behaves, in memory.
@@ -65,6 +66,7 @@ class FakeCoordinator(
             it.welcomes = welcomes
             it.streams = streams
             it.joinRequests = joinRequests
+            it.sequence = sequence
         }
 
     class StoredKeyPackage(
@@ -95,11 +97,60 @@ class FakeCoordinator(
     /** Every method name called, in order. */
     val calls = mutableListOf<String>()
 
-    private var cursor = 0L
+    /** The coordinator's cursor, shared by every [viewAs] of it as the real one's is. */
+    class Sequence {
+        var cursor = 0L
+    }
+
+    private var sequence = Sequence()
     private var clock = 1_757_000_000L
 
     /** Fails the next [failNext] calls, to exercise the health surface. */
     var failNext = 0
+
+    /** Fails the next `msg_post` without storing it: the post never landed. */
+    var failNextPost = false
+
+    /** Stores the next `msg_post` and then fails it: it landed, and the answer was lost. */
+    var storeThenFailNextPost = false
+
+    /**
+     * Runs once, inside the next `msg_post`, before its cursor is assigned: what somebody else
+     * posting at that moment looks like, so their message is sequenced first.
+     */
+    var beforeNextPost: (suspend () -> Unit)? = null
+
+    /**
+     * Fails the next `msg_post` and keeps it, unsequenced, until [releaseHeld]: a request still
+     * travelling over the relays when the client gave up on it, which the coordinator sequences
+     * later.
+     */
+    var holdNextPost = false
+
+    private val held = mutableListOf<Pair<String, String>>()
+
+    /** Sequences every post [holdNextPost] kept, as the coordinator finally receiving them. */
+    fun releaseHeld() {
+        held.forEach { (gid, sealed) -> inject(gid, sealed) }
+        held.clear()
+    }
+
+    /** Fails the next `welcome_store`. */
+    var failNextWelcomeStore = false
+
+    /** Virtual milliseconds every `msg_post` takes, so concurrent callers interleave. */
+    var postDelayMs = 0L
+
+    /** How many messages one `msg_fetch_many` returns at most, as a real coordinator pages. */
+    var pageSize = Int.MAX_VALUE
+
+    /** Appends [sealedBase64] to [gid]'s stream as if somebody posted it. */
+    fun inject(
+        gid: String,
+        sealedBase64: String,
+    ) {
+        streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, ++sequence.cursor, sealedBase64, clock++)
+    }
 
     /** Pre-loads a KeyPackage as if its owner had published it. */
     fun seedKeyPackage(stored: StoredKeyPackage) {
@@ -162,6 +213,10 @@ class FakeCoordinator(
         after: Long?,
     ): Long {
         record("welcome_store")
+        if (failNextWelcomeStore) {
+            failNextWelcomeStore = false
+            throw IllegalStateException("welcome_store failed")
+        }
         val at = clock++
         welcomes.getOrPut(targetPubKey) { mutableListOf() } += PendingWelcome(keyPackageRef, welcomeBase64, at, after)
         return at
@@ -202,10 +257,28 @@ class FakeCoordinator(
         sealedBase64: String,
     ): PostedMessage {
         record("msg_post")
+        if (postDelayMs > 0) delay(postDelayMs)
+        if (holdNextPost) {
+            holdNextPost = false
+            held += gid to sealedBase64
+            throw IllegalStateException("msg_post timed out")
+        }
+        beforeNextPost?.let {
+            beforeNextPost = null
+            it()
+        }
+        if (failNextPost) {
+            failNextPost = false
+            throw IllegalStateException("msg_post failed")
+        }
         // Monotonic across the whole coordinator, which is stricter than
         // spec/00.md §4 requires (per group) and so a safe stand-in.
-        val assigned = ++cursor
+        val assigned = ++sequence.cursor
         streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, assigned, sealedBase64, clock++)
+        if (storeThenFailNextPost) {
+            storeThenFailNextPost = false
+            throw IllegalStateException("msg_post timed out")
+        }
         return PostedMessage(gid, assigned, clock)
     }
 
@@ -214,6 +287,7 @@ class FakeCoordinator(
         return cursors.entries
             .flatMap { (gid, after) -> streams[gid].orEmpty().filter { it.cursor > (after ?: 0L) } }
             .sortedBy { it.cursor }
+            .take(pageSize)
     }
 
     override suspend fun subscribeMessages(
