@@ -2,7 +2,6 @@
 
 [![GitHub downloads](https://img.shields.io/github/downloads/vitorpamplona/cordn-kmp/total?label=Downloads&labelColor=27303D&color=0D1117&logo=github&logoColor=FFFFFF&style=flat)](https://github.com/vitorpamplona/cordn-kmp/releases)
 [![Last Version](https://img.shields.io/github/release/vitorpamplona/cordn-kmp.svg?maxAge=3600&label=Stable&labelColor=06599d&color=043b69)](https://github.com/vitorpamplona/cordn-kmp/releases/latest)
-[![Maven Central](https://img.shields.io/maven-central/v/com.vitorpamplona.cordn/cordn?label=Maven%20Central&labelColor=27303D&color=0877d2)](https://central.sonatype.com/artifact/com.vitorpamplona.cordn/cordn)
 [![JitPack snapshots](https://img.shields.io/badge/snapshots-JitPack-27303D?labelColor=27303D&color=0877d2)](https://jitpack.io/#vitorpamplona/cordn-kmp)
 [![CI](https://img.shields.io/github/actions/workflow/status/vitorpamplona/cordn-kmp/build.yml?labelColor=27303D)](https://github.com/vitorpamplona/cordn-kmp/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/github/license/vitorpamplona/cordn-kmp?labelColor=27303D&color=0877d2)](LICENSE)
@@ -23,19 +22,24 @@ dependencies {
 }
 ```
 
-Releases are on Maven Central.
-Releases also go to Nostr + Blossom through [Magpie](https://github.com/vitorpamplona/magpie). To
-take them from there (signed by the key `vitorpamplona.com/.well-known/nostr.json` names as
-`releases`), add Magpie's settings plugin in `settings.gradle.kts` and commit the
-`gradle/magpie.lock` it writes; Gradle has to run on Java 21 or newer:
+Releases are on Nostr + Blossom, through [Magpie](https://github.com/vitorpamplona/magpie)
+(Maven Central up to 1.2.1), and so are the libraries it depends on. Add Magpie's settings
+plugin in `settings.gradle.kts`: it serves these groups, trusting only the key
+`vitorpamplona.com/.well-known/nostr.json` names as `releases`. Commit the `gradle/magpie.lock`
+it writes; Gradle has to run on Java 21 or newer:
 
 ```kotlin
 plugins {
-    id("com.vitorpamplona.magpie") version "0.2.0"
+    id("com.vitorpamplona.magpie") version "0.2.2"
 }
 
 magpie {
     group("com.vitorpamplona.cordn")
+    group("com.vitorpamplona.quartz")
+    group("com.vitorpamplona.crypto")
+    group("com.vitorpamplona.schnorr256k1")
+    group("com.vitorpamplona.negentropy")
+    group("com.vitorpamplona.mls")
 }
 ```
 
