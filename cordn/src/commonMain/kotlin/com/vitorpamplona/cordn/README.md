@@ -158,7 +158,7 @@ partial:
 
 Plan §8 has the full analysis.
 
-## Five spec/implementation divergences found
+## Seven spec/implementation divergences found
 
 1. **`spec/01.md` §3 contradicts itself**: "MLS variable-length vector encoding
    conventions" and then `opaque Name<0..2^16-1>`, which are different
@@ -186,6 +186,18 @@ Plan §8 has the full analysis.
    decoders ignore them, and the unmerged coordinator-handoff draft appends
    `coordinator_routing` to every metadata it writes. We refused them, which read
    an administered group as egalitarian. They are now kept and re-encoded.
+6. **A non-author's calendar cancellation masks the author's in cordn-web.**
+   `calendar-events.md` §6 says other members' cancellations are ignored;
+   cordn-web keeps the newest-cursor cancellation from anyone and only then
+   checks its author, so a later stray kind 5 un-cancels an event there and not
+   here. We follow the spec (`CordnCalendar.fold`); worth raising upstream.
+   Calendar validation (§3–§4) is otherwise cordn-web's, with one gap: it asks
+   `Intl` whether a `*_tzid` names a real zone, and we, with no zone database,
+   check only its shape.
+7. **A former-epoch message from a sender a later epoch removed is refused.**
+   cordn-web shows it. A removed member still holds the epoch they were removed
+   from and could keep posting into the group until four Commits later; the
+   retained epochs are for lagging senders, not departed ones.
 
 ## Testing
 
