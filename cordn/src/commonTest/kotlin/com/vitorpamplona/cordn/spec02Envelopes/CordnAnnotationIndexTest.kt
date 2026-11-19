@@ -295,7 +295,7 @@ class CordnAnnotationIndexTest {
     // ---- polls and calendar (cordn-web 0.6.0, calendar-events.md) -----------
 
     @Test
-    fun `poll votes and RSVPs are never rows, polls are`() {
+    fun `poll votes and RSVPs are never rows but polls are`() {
         assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.POLL_RESPONSE))
         assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.CALENDAR_RSVP))
         assertTrue(CordnMessageKinds.isStreamHidden(CordnMessageKinds.REACTION))
@@ -356,7 +356,7 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
-    fun `revision order is created_at, then the cursor`() {
+    fun `revision order is created_at then the cursor`() {
         val later = calendarEvent(alice, "d1", "later", createdAt = 300)
         val earlierButAfter = calendarEvent(alice, "d1", "earlier", createdAt = 200)
         val index = CordnAnnotationIndex.of(listOf(later, earlierButAfter))
@@ -371,7 +371,7 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
-    fun `the kind is part of a calendar event's identity, and so is its author`() {
+    fun `the kind is part of a calendar event's identity and so is its author`() {
         val timed = calendarEvent(alice, "d1", "timed", createdAt = 100)
         val allDay = calendarEvent(alice, "d1", "all day", createdAt = 200, kind = CordnMessageKinds.CALENDAR_DATE)
         val bobs = calendarEvent(bob, "d1", "bob's", createdAt = 300)
@@ -382,7 +382,7 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
-    fun `a cancelled event is cancelled, not deleted`() {
+    fun `a cancelled event is cancelled not deleted`() {
         val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
         val index = CordnAnnotationIndex.of(listOf(event, cancellation(alice, event)))
 
@@ -425,7 +425,7 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
-    fun `a calendar row reads its title, then its alt`() {
+    fun `a calendar row reads its title then its alt`() {
         assertEquals("Standup", CordnCalendar.titleOf(calendarEvent(alice, "d1", "Standup", createdAt = 1).envelope))
         val untitled = message(alice, CordnMessageKinds.CALENDAR_DATE, "desc", arrayOf(arrayOf("d", "x"), arrayOf("alt", "Calendar event: Trip")))
         assertEquals("Calendar event: Trip", CordnCalendar.titleOf(untitled.envelope))
@@ -454,7 +454,7 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
-    fun `a d that is not an identifier is no event, and no coordinate names one`() {
+    fun `a d that is not an identifier is no event and no coordinate names one`() {
         val colon = message(alice, CordnMessageKinds.CALENDAR_TIME, "", arrayOf(arrayOf("d", "a:b"), arrayOf("title", "t"), arrayOf("start", "1757000000")))
         assertTrue(CordnAnnotationIndex.of(listOf(colon)).isUnsupportedEvent(colon.envelope.id))
         assertEquals(null, CordnCalendar.cancelledCoordinate(CordnMessageKinds.DELETION, arrayOf(arrayOf("a", "31923:$alice:a:b"))))
