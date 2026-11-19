@@ -77,17 +77,28 @@ object SealedPayload {
     }
 
     /** Opens a sealed payload, or throws if it is malformed or fails AEAD verification. */
-    @OptIn(ExperimentalEncodingApi::class)
     fun open(
         sealedBase64: String,
         key: ByteArray,
+    ): ByteArray = open(decode(sealedBase64), key)
+
+    /**
+     * The bytes of a sealed payload, for trying several keys on one payload with the other
+     * [open] without decoding it again for each.
+     */
+    @OptIn(ExperimentalEncodingApi::class)
+    fun decode(sealedBase64: String): ByteArray =
+        try {
+            Base64.decode(sealedBase64)
+        } catch (e: IllegalArgumentException) {
+            throw IllegalArgumentException("cordn sealed payload is not valid base64", e)
+        }
+
+    /** Opens a payload [decode] returned, or throws if it is malformed or fails AEAD verification. */
+    fun open(
+        payload: ByteArray,
+        key: ByteArray,
     ): ByteArray {
-        val payload =
-            try {
-                Base64.decode(sealedBase64)
-            } catch (e: IllegalArgumentException) {
-                throw IllegalArgumentException("cordn sealed payload is not valid base64", e)
-            }
         require(payload.size >= MIN_SIZE) {
             "cordn sealed payload must be at least $MIN_SIZE bytes, was ${payload.size}"
         }

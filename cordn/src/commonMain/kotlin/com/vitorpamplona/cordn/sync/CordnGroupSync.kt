@@ -23,6 +23,11 @@ package com.vitorpamplona.cordn.sync
 import com.vitorpamplona.cordn.spec00Coordinator.GroupMessage
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.cordn.spec00Coordinator.PostedMessage
+import com.vitorpamplona.quartz.utils.concurrent.PlatformLock
+import com.vitorpamplona.quartz.utils.concurrent.withLock
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * Fetch-then-subscribe over a set of groups on one coordinator.
@@ -47,8 +52,11 @@ class CordnGroupSync(
     /** Inbox per `gid`. The caller owns them, because they outlive a sync run. */
     private val inboxes: MutableMap<String, GroupInbox> = mutableMapOf(),
 ) {
+    /** Guards the [inboxes] map itself; each inbox is its group's caller's to serialize. */
+    private val inboxLock = PlatformLock()
+
     /** The inbox for [gid], created at cursor 0 if this is the first time. */
-    fun inbox(gid: String): GroupInbox = inboxes.getOrPut(gid) { GroupInbox() }
+    fun inbox(gid: String): GroupInbox = inboxLock.withLock { inboxes.getOrPut(gid) { GroupInbox() } }
 
     /** Resumes [gid] from a persisted cursor. */
     fun restore(
@@ -56,11 +64,13 @@ class CordnGroupSync(
         cursor: GroupCursor,
         echoes: EchoState = EchoState(),
     ) {
-        inboxes[gid] = GroupInbox(cursor, echoes)
+        inboxLock.withLock { inboxes[gid] = GroupInbox(cursor, echoes) }
     }
 
+    private fun snapshot(): Map<String, GroupInbox> = inboxLock.withLock { inboxes.toMap() }
+
     /** The cursors to persist. */
-    fun cursors(): Map<String, GroupCursor> = inboxes.mapValues { it.value.cursor }
+    fun cursors(): Map<String, GroupCursor> = snapshot().mapValues { it.value.cursor }
 
     /**
      * The echo bookkeeping to persist, per group.
@@ -70,7 +80,7 @@ class CordnGroupSync(
      * leaves a client re-reading its own traffic with no way to recognise it.
      * See [EchoState].
      */
-    fun echoes(): Map<String, EchoState> = inboxes.mapValues { it.value.echoes() }
+    fun echoes(): Map<String, EchoState> = snapshot().mapValues { it.value.echoes() }
 
     /**
      * Drains history for [gids] until every group is current.
@@ -86,26 +96,53 @@ class CordnGroupSync(
         gids: Collection<String>,
         maxPages: Int = DEFAULT_MAX_PAGES,
         onMessage: (String, Ingestion) -> Unit,
-    ): Int {
+    ): Int = drain(gids, maxPages, onMessage = onMessage).delivered
+
+    /** What one [drain] did. */
+    class Drained(
+        /** Messages handed on. */
+        val delivered: Int,
+        /**
+         * Whether the last fetch came back empty, the only honest "you are current": the
+         * coordinator does not say how much is left. False when [drain] stopped at its page
+         * budget, or because the coordinator served nothing new.
+         */
+        val current: Boolean,
+    )
+
+    /**
+     * [catchUp], saying whether it got to the end.
+     *
+     * [guard] runs around each message's classification and [onMessage], with the message's
+     * group: a caller that serializes work per group takes the group's lock there, so a message
+     * is classified and processed in one step that nothing else on that group interleaves with.
+     */
+    suspend fun drain(
+        gids: Collection<String>,
+        maxPages: Int = DEFAULT_MAX_PAGES,
+        guard: suspend (gid: String, deliver: () -> Unit) -> Unit = { _, deliver -> deliver() },
+        onMessage: (String, Ingestion) -> Unit,
+    ): Drained {
         require(gids.isNotEmpty()) { "catchUp needs at least one group" }
         var delivered = 0
 
         repeat(maxPages) {
+            val sent = gids.associateWith { inbox(it).cursor.fetchCursor }
             val page = client.fetchMessages(gids.associateWith { inbox(it).cursor.afterOrNull() })
             // An empty page is the only honest "you are current" signal: the
             // coordinator does not say how much is left.
-            if (page.isEmpty()) return delivered
+            if (page.isEmpty()) return Drained(delivered, current = true)
 
-            val before = gids.associateWith { inbox(it).cursor.lastCursor }
-            page.forEach { message -> deliver(message, onMessage) }
-            delivered += page.size
+            page.forEach { message -> guard(message.gid) { if (deliver(message, onMessage)) delivered++ } }
 
             // A page that moved no cursor means the coordinator is serving the
             // same records back. Stopping beats looping: the alternative is a
-            // silent infinite fetch against a broken or hostile server.
-            if (gids.none { inbox(it).cursor.lastCursor > (before[it] ?: 0) }) return delivered
+            // silent infinite fetch against a broken or hostile server. Measured
+            // against what was asked for rather than before and after this page,
+            // so a page another reader already ingested still counts as progress.
+            if (gids.none { inbox(it).cursor.fetchCursor > (sent[it] ?: 0) }) return Drained(delivered, current = false)
         }
-        return delivered
+        return Drained(delivered, current = false)
     }
 
     /**
@@ -129,14 +166,50 @@ class CordnGroupSync(
         }
     }
 
+    /**
+     * [subscribe], with each message run through [guard] (see [drain]).
+     *
+     * The stream's callback cannot wait, and a lock can only be waited for, so messages are
+     * queued in arrival order and handed on by a worker. Those still queued when the
+     * subscription ends are dropped with it: their cursors never moved, so the next catch-up
+     * fetches them again.
+     */
+    suspend fun subscribe(
+        gids: Collection<String>,
+        timeoutMs: Long,
+        guard: suspend (gid: String, deliver: () -> Unit) -> Unit,
+        onMessage: (String, Ingestion) -> Unit,
+    ) {
+        require(gids.isNotEmpty()) { "subscribe needs at least one group" }
+        coroutineScope {
+            val queue = Channel<GroupMessage>(Channel.UNLIMITED)
+            val worker =
+                launch {
+                    for (message in queue) guard(message.gid) { deliver(message, onMessage) }
+                }
+            try {
+                client.subscribeMessages(
+                    cursors = gids.associateWith { inbox(it).cursor.afterOrNull() },
+                    timeoutMs = timeoutMs,
+                ) { message -> queue.trySend(message) }
+            } catch (e: Throwable) {
+                worker.cancel()
+                throw e
+            } finally {
+                queue.close()
+            }
+        }
+    }
+
     /** Classifies [message] and hands it on, unless it is one this group has already passed. */
     private fun deliver(
         message: GroupMessage,
         onMessage: (String, Ingestion) -> Unit,
-    ) {
+    ): Boolean {
         val inbox = inbox(message.gid)
-        if (inbox.hasPassed(message)) return
+        if (inbox.hasPassed(message)) return false
         onMessage(message.gid, inbox.accept(message))
+        return true
     }
 
     /**
@@ -196,7 +269,7 @@ class CordnGroupSync(
     ): PostedMessage = client.postMessage(gid, sealedBase64)
 
     /** Groups with a Commit posted but not yet seen coming back. */
-    fun unconfirmed(): Map<String, List<PendingEpochOperation>> = inboxes.mapValues { it.value.pending() }.filterValues { it.isNotEmpty() }
+    fun unconfirmed(): Map<String, List<PendingEpochOperation>> = snapshot().mapValues { it.value.pending() }.filterValues { it.isNotEmpty() }
 
     companion object {
         /** Enough for a long history, short of letting startup hang. */

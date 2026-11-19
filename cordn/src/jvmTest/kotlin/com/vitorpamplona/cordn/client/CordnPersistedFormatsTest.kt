@@ -32,6 +32,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Persisted formats are API: what this version adds must load what the last one wrote, and the
@@ -101,5 +102,99 @@ class CordnPersistedFormatsTest {
         val legacy = CordnDeliveredMessageCodec.encode(CordnDeliveredMessage(envelope, 5))
         assertEquals(false, legacy.contains("\"mk\""))
         assertNull(CordnDeliveredMessageCodec.decode(legacy).mediaKey)
+    }
+
+    /** What 1.3.0's decoder returned for [bytes]: the two vectors, nothing after them. */
+    private fun previousReleaseDecode(bytes: ByteArray): Pair<List<Pair<String, Boolean>>, List<Long>> {
+        val reader = TlsReader(bytes)
+        assertEquals(1, reader.readUint16())
+        val commits = TlsReader(reader.readOpaque2())
+        val pending = mutableListOf<Pair<String, Boolean>>()
+        while (commits.hasRemaining) pending += commits.readOpaque2().decodeToString() to (commits.readUint8() == 1)
+        val cursors = TlsReader(reader.readOpaque2())
+        val own = mutableListOf<Long>()
+        while (cursors.hasRemaining) own += cursors.readUint64()
+        return pending to own
+    }
+
+    @Test
+    fun `a record with nothing new is written exactly as the previous release wrote it`() {
+        val state = EchoState(listOf(PendingEpochOperation("c2VhbGVk", localStateApplied = true)), listOf(7))
+        assertContentEquals(previousReleaseEchoState(), EchoStateCodec.encode(state))
+    }
+
+    @Test
+    fun `settled commits and where they landed round-trip, and the previous release sees only the outstanding ones`() {
+        val state =
+            EchoState(
+                pendingCommits =
+                    listOf(
+                        PendingEpochOperation("cGVuZGluZw==", localStateApplied = false, fromEpoch = 4),
+                        PendingEpochOperation("bG9zdA==", localStateApplied = false, status = PendingEpochOperation.Status.LOST, fromEpoch = 3, landedAt = 9),
+                        PendingEpochOperation(
+                            "Y29uZmlybWVk",
+                            localStateApplied = false,
+                            welcomes = listOf(DeferredWelcome("aa".repeat(32), "ref", "d2VsY29tZQ==")),
+                            status = PendingEpochOperation.Status.CONFIRMED,
+                            fromEpoch = 2,
+                            landedAt = 8,
+                        ),
+                    ),
+                ownMessageCursors = listOf(10),
+            )
+        val bytes = EchoStateCodec.encode(state)
+        assertEquals(state, EchoStateCodec.decode(bytes))
+        assertEquals(listOf("cGVuZGluZw==" to false) to listOf(10L), previousReleaseDecode(bytes))
+    }
+
+    @Test
+    fun `a commit larger than an opaque2 encodes, round-trips, and stores its Welcome once`() {
+        val sealed = "A".repeat(70_000)
+        val welcome = "W".repeat(10_000)
+        val state =
+            EchoState(
+                pendingCommits =
+                    listOf(
+                        PendingEpochOperation(
+                            sealed,
+                            localStateApplied = false,
+                            welcomes = List(30) { DeferredWelcome(it.toString(16).padStart(64, '0'), "ref$it", welcome) },
+                            fromEpoch = 1,
+                        ),
+                    ),
+                ownMessageCursors = List(9_000) { it.toLong() + 1 },
+            )
+        val bytes = EchoStateCodec.encode(state)
+        assertEquals(state, EchoStateCodec.decode(bytes))
+        assertTrue(bytes.size < sealed.length + 2 * welcome.length + 9_000 * 8 + 4_000, "the Welcome is stored once, not per invitee: ${bytes.size}")
+        // The previous release still reads the rest, without the Commit it could not have held.
+        val (pending, own) = previousReleaseDecode(bytes)
+        assertTrue(pending.isEmpty())
+        assertEquals(65_535 / 8, own.size)
+    }
+
+    @Test
+    fun `an unreadable trailing section costs only itself`() {
+        val writer = TlsWriter()
+        writer.putBytes(previousReleaseEchoState())
+        writer.putUint32(2)
+        writer.putOpaque4(byteArrayOf(0, 0, 0, 9, 1))
+        val loaded = EchoStateCodec.decode(writer.toByteArray())
+        assertEquals(listOf(PendingEpochOperation("c2VhbGVk", localStateApplied = true)), loaded.pendingCommits)
+        assertEquals(listOf(7L), loaded.ownMessageCursors)
+    }
+
+    @Test
+    fun `a media key that is not a 32-byte hex string drops only the key`() {
+        val good = CordnDeliveredMessageCodec.encode(CordnDeliveredMessage(envelope, 5, ByteArray(32) { 1 }))
+        val asObject = good.replace(Regex("\"mk\":\"[0-9a-f]+\""), "\"mk\":{\"x\":1}")
+        val asArray = good.replace(Regex("\"mk\":\"[0-9a-f]+\""), "\"mk\":[1,2]")
+        val short = good.replace(Regex("\"mk\":\"[0-9a-f]+\""), "\"mk\":\"abcd\"")
+        listOf(asObject, asArray, short).forEach { entry ->
+            val decoded = CordnDeliveredMessageCodec.decode(entry)
+            assertNull(decoded.mediaKey, entry)
+            assertEquals(5, decoded.cursor)
+            assertEquals(envelope, decoded.envelope)
+        }
     }
 }

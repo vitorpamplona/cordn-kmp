@@ -39,25 +39,36 @@ import com.vitorpamplona.cordn.spec02Envelopes.ReceivedMessage
 import com.vitorpamplona.cordn.spec03Payloads.SealedPayload
 import com.vitorpamplona.cordn.sync.CordnGroupSync
 import com.vitorpamplona.cordn.sync.DeferredWelcome
+import com.vitorpamplona.cordn.sync.EchoState
+import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.cordn.sync.Ingestion
 import com.vitorpamplona.cordn.sync.PendingEpochOperation
 import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.framing.ContentType
 import com.vitorpamplona.mls.framing.MlsMessage
+import com.vitorpamplona.mls.framing.PrivateMessage
 import com.vitorpamplona.mls.framing.WireFormat
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.group.MlsGroupState
+import com.vitorpamplona.mls.group.StagedCommitState
 import com.vitorpamplona.mls.messages.CommitResult
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.utils.Log
 import com.vitorpamplona.quartz.utils.TimeUtils
+import com.vitorpamplona.quartz.utils.concurrent.ConcurrentMap
+import com.vitorpamplona.quartz.utils.concurrent.PlatformLock
+import com.vitorpamplona.quartz.utils.concurrent.withLock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -86,6 +97,15 @@ import kotlin.uuid.Uuid
  * per coordinator, so the set of groups one manager touches is exactly the set
  * that coordinator can link together. [exposure] reports that from the real
  * count rather than from a guess.
+ *
+ * ## One thing at a time per group
+ *
+ * Every operation on a group runs under that group's lock: a Commit from the catch-up that
+ * precedes it to the Welcomes that follow it, a send from its seal to its record, each message a
+ * sync ingests, each save. MLS state is a sequence, and two of them interleaving is how a second
+ * Commit's catch-up discarded a first one still in flight (forking the group) and how a save could
+ * read the state halfway through an ingest. Different groups do not wait for each other.
+ * cordn-web does the same (`runGroupOperation`, a promise chain per group).
  */
 @OptIn(ExperimentalEncodingApi::class)
 class CordnGroupManager(
@@ -98,7 +118,11 @@ class CordnGroupManager(
     /** Seconds. Injected so tests are not at the mercy of the wall clock. */
     private val clock: () -> Long = { TimeUtils.now() },
 ) : CordnSyncSource {
-    private val groups = mutableMapOf<String, MlsGroup>()
+    /** Each group this manager holds, with what is cached and saved of it. */
+    private val groups = ConcurrentMap<String, Slot>()
+
+    /** One lock per group. Never removed, so two holders can never hold two different locks for one gid. */
+    private val groupLocks = ConcurrentMap<String, Mutex>()
     private val sync = CordnGroupSync(coordinator)
 
     private val _gids = MutableStateFlow<Set<String>>(emptySet())
@@ -106,7 +130,11 @@ class CordnGroupManager(
     /** The groups this manager holds, for a UI to observe. */
     override val gids: StateFlow<Set<String>> = _gids.asStateFlow()
 
+    @Volatile
     private var publishedKeyPackage = false
+
+    /** Guards [pendingRetirements] and [pendingRequestRetirements], which every group shares. */
+    private val retirementLock = PlatformLock()
 
     /** Acknowledgements a failed [retire] left to ride the next `welcome_take`. */
     private val pendingRetirements = mutableListOf<ConsumedWelcomeRef>()
@@ -139,6 +167,16 @@ class CordnGroupManager(
         ) : Delivery {
             /** The message as the store and a room hold it. */
             val delivered: CordnDeliveredMessage get() = CordnDeliveredMessage(received.envelope, cursor, mediaKey)
+
+            // By content: a data class compares a ByteArray by reference.
+            override fun equals(other: Any?): Boolean =
+                other is Message &&
+                    gid == other.gid &&
+                    cursor == other.cursor &&
+                    received == other.received &&
+                    (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
+
+            override fun hashCode(): Int = 31 * (31 * (31 * gid.hashCode() + cursor.hashCode()) + received.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
         }
 
         /** A handshake message; the group has advanced to [epoch]. */
@@ -172,9 +210,9 @@ class CordnGroupManager(
          * sequenced first, or ours never reached the coordinator. The group is on the winner's
          * epoch and the change (an invite, a removal, a rename) must be made again.
          *
-         * Reported here for a Commit settled after the call that made it had returned (its
-         * post or its confirmation failed); a call still waiting throws
-         * [CordnGroupException.Reason.COMMIT_LOST] instead.
+         * Reported here, once, for a Commit settled after the call that made it had returned
+         * (its post or its confirmation failed); a call still waiting throws
+         * [CordnGroupException.Reason.COMMIT_LOST] instead, and nothing is reported here.
          */
         data class CommitLost(
             override val gid: String,
@@ -191,25 +229,108 @@ class CordnGroupManager(
      */
     var deliveryListener: (Delivery) -> Unit = {}
 
-    /** Own Commits whose echo has been seen: true when it was applied, false when it had lost. */
-    private val commitOutcomes = mutableMapOf<String, Boolean>()
+    /** What became of an own Commit whose call is still waiting on it. */
+    private enum class CommitOutcome { WAITING, APPLIED, LOST }
 
-    /** Welcomes whose Commit was confirmed outside the call that made it, by gid. */
-    private val confirmedWelcomes = mutableMapOf<String, MutableList<Pair<DeferredWelcome, Long>>>()
+    /**
+     * Own Commits a call is waiting on, by sealed payload. Written by the ingest that settles one,
+     * read and removed by the call: entries live exactly as long as the call.
+     */
+    private val inFlight = ConcurrentMap<String, CommitOutcome>()
+
+    /**
+     * Staged Commits dropped because a stream read to the end did not hold them, by sealed
+     * payload, kept so that a late echo (a `msg_post` the coordinator sequenced after its answer
+     * timed out) can still be merged while the group is on the epoch it was built at. Memory only:
+     * after a restart a late echo is recognised and reported, as cordn-web does, but not merged.
+     */
+    private val lostStaged = ConcurrentMap<String, LostCommit>()
+
+    private class LostCommit(
+        val gid: String,
+        val staged: StagedCommitState,
+        val welcomes: List<DeferredWelcome>,
+    )
+
+    /**
+     * One group: its MLS state and what this manager knows about it beside that.
+     *
+     * Everything here is read and written under the group's lock, except [keys], which
+     * [mediaKeyFor] reads without it.
+     */
+    private class Slot(
+        group: MlsGroup,
+    ) {
+        var group: MlsGroup = group
+            set(value) {
+                field = value
+                keys = null
+            }
+
+        /** The MLS state changed since it was last saved. */
+        var dirty = true
+
+        var savedCursor: GroupCursor? = null
+        var savedEcho: EchoState? = null
+
+        /** The keys of the epoch the group is on, derived once per epoch rather than per payload. */
+        @Volatile
+        var keys: EpochKeys? = null
+
+        /**
+         * Messages delivered but not yet written. [ingest] is not a suspend function -- it runs
+         * inside the sync's own delivery callback -- so it cannot write. It queues here instead,
+         * and [persist] drains the queue immediately before the cursor. Held in memory only for
+         * as long as the cursor is: neither is on disk until a run ends, so a crash mid-run loses
+         * both together and the next catch-up refetches from the last cursor that *was* written.
+         */
+        val pendingMessages = ArrayDeque<CordnDeliveredMessage>()
+    }
+
+    /**
+     * The payload and media keys of one epoch, and of the former epochs MLS retains beside it.
+     *
+     * Each is an HKDF exporter derivation, and the former ones were derived again for every
+     * payload the current key did not open: four exporters per message around every Commit.
+     */
+    private class EpochKeys(
+        val epoch: Long,
+        val payload: ByteArray,
+        val media: ByteArray,
+    ) {
+        var former: List<Pair<Long, ByteArray>>? = null
+        val formerMedia = mutableMapOf<Long, ByteArray?>()
+
+        /** Who is in the group at this epoch: the accounts, and the leaves they hold. */
+        var members: Set<HexKey>? = null
+        var leaves: Set<Int>? = null
+    }
 
     // ---- membership ------------------------------------------------------
 
     /** The group behind [gid], if this manager holds it. */
-    fun group(gid: String): MlsGroup? = groups[gid]
+    fun group(gid: String): MlsGroup? = groups[gid]?.group
 
     /** Restores every group and cursor the store holds. Call once at startup. */
     suspend fun restore() {
         store.listGroups().forEach { gid ->
-            val blob = store.loadGroup(gid) ?: return@forEach
-            groups[gid] = MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)
-            store.loadCursor(gid)?.let { sync.restore(gid, it, store.loadEchoState(gid)) }
+            withGroup(gid) {
+                val blob = store.loadGroup(gid) ?: return@withGroup
+                val slot = Slot(MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)).apply { dirty = false }
+                store.loadCursor(gid)?.let { cursor ->
+                    val echoes = store.loadEchoState(gid)
+                    sync.restore(gid, cursor, echoes)
+                    slot.savedCursor = cursor
+                    slot.savedEcho = echoes
+                }
+                groups[gid] = slot
+            }
         }
-        _gids.value = groups.keys.toSet()
+        publishGids()
+    }
+
+    private fun publishGids() {
+        _gids.value = groups.snapshot().keys
     }
 
     /**
@@ -224,19 +345,23 @@ class CordnGroupManager(
         gid: String,
         metadata: CordnGroupMetadata,
     ): MlsGroup {
-        require(gid !in groups) { "already in a group with gid $gid" }
         val group =
-            MlsGroup.create(
-                identity = CordnCredential.of(accountPubKey).identity,
-                policy = CordnGroupPolicy,
-                initialExtensions = listOf(metadata.toExtension()),
-                // See [gidFrom]: this is what lets a joiner -- ours or theirs --
-                // learn the delivery id from the Welcome alone.
-                groupId = gid.encodeToByteArray(),
-            )
-        groups[gid] = group
-        persist(gid)
-        _gids.value = groups.keys.toSet()
+            withGroup(gid) {
+                require(groups[gid] == null) { "already in a group with gid $gid" }
+                val group =
+                    MlsGroup.create(
+                        identity = CordnCredential.of(accountPubKey).identity,
+                        policy = CordnGroupPolicy,
+                        initialExtensions = listOf(metadata.toExtension()),
+                        // See [gidFrom]: this is what lets a joiner -- ours or theirs --
+                        // learn the delivery id from the Welcome alone.
+                        groupId = gid.encodeToByteArray(),
+                    )
+                groups[gid] = Slot(group)
+                persist(gid)
+                group
+            }
+        publishGids()
         return group
     }
 
@@ -278,36 +403,37 @@ class CordnGroupManager(
         gid: String,
         targetPubKey: HexKey,
         keyPackageRef: String? = null,
-    ): InviteResult {
-        // Before the KeyPackage: a group this device cannot change must not
-        // spend somebody's one-time KeyPackage on the attempt.
-        prepareToCommit(gid)
+    ): InviteResult =
+        withGroup(gid) {
+            // Before the KeyPackage: a group this device cannot change must not
+            // spend somebody's one-time KeyPackage on the attempt.
+            prepareToCommit(gid)
 
-        // By ref when we have one: a join request names the exact KeyPackage
-        // its sender published for this purpose, and taking a different one of
-        // theirs would spend a package they meant for someone else.
-        val taken =
-            call { coordinator.takeKeyPackage(keyPackageRef ?: targetPubKey) }
-                ?: throw CordnGroupException(
-                    "the coordinator holds no KeyPackage for $targetPubKey",
-                    CordnGroupException.Reason.NO_KEY_PACKAGE,
+            // By ref when we have one: a join request names the exact KeyPackage
+            // its sender published for this purpose, and taking a different one of
+            // theirs would spend a package they meant for someone else.
+            val taken =
+                call { coordinator.takeKeyPackage(keyPackageRef ?: targetPubKey) }
+                    ?: throw CordnGroupException(
+                        "the coordinator holds no KeyPackage for $targetPubKey",
+                        CordnGroupException.Reason.NO_KEY_PACKAGE,
+                    )
+            val verified = KeyPackagePublication.verify(taken.publicationEvent)
+            if (verified.pubKey != targetPubKey) {
+                throw CordnGroupException(
+                    "the KeyPackage served for $targetPubKey belongs to ${verified.pubKey}",
+                    CordnGroupException.Reason.WRONG_KEY_PACKAGE_OWNER,
                 )
-        val verified = KeyPackagePublication.verify(taken.publicationEvent)
-        if (verified.pubKey != targetPubKey) {
-            throw CordnGroupException(
-                "the KeyPackage served for $targetPubKey belongs to ${verified.pubKey}",
-                CordnGroupException.Reason.WRONG_KEY_PACKAGE_OWNER,
-            )
-        }
-
-        val committed =
-            stageAndPost(gid, welcomeTo = listOf(targetPubKey to taken.keyPackageRef)) { group ->
-                group.proposeAdd(verified.bytes)
-                group.stageCommit()
             }
-        val welcomeAt = committed.welcomes.getValue(targetPubKey).getOrThrow()
-        return InviteResult(gid, targetPubKey, taken.keyPackageRef, committed.cursor, welcomeAt)
-    }
+
+            val committed =
+                stageAndPost(gid, welcomeTo = listOf(targetPubKey to taken.keyPackageRef)) { group ->
+                    group.proposeAdd(verified.bytes)
+                    group.stageCommit()
+                }
+            val welcomeAt = committed.welcomes.getValue(targetPubKey).getOrThrow()
+            InviteResult(gid, targetPubKey, taken.keyPackageRef, committed.cursor, welcomeAt)
+        }
 
     /**
      * Invites several people in ONE commit.
@@ -321,71 +447,73 @@ class CordnGroupManager(
      * coordinator holds nothing for fails while nothing has changed; those come
      * back in [BatchInviteResult.refused]. A Welcome that fails to store after
      * the commit is per-target and harmless to the group, and comes back in
-     * [BatchInviteResult.undelivered].
+     * [BatchInviteResult.undelivered]; it stays owed on disk, and a later sync stores it.
      */
     suspend fun inviteAll(
         gid: String,
         targetPubKeys: List<HexKey>,
     ): BatchInviteResult {
         if (targetPubKeys.isEmpty()) return BatchInviteResult(gid, emptyList(), emptyMap(), emptyMap())
-        prepareToCommit(gid)
+        return withGroup(gid) {
+            prepareToCommit(gid)
 
-        // Phase 1, before anything is committed: take and verify every
-        // KeyPackage. A failure here spends a KeyPackage for the targets
-        // already taken and nothing else -- the group has not moved.
-        val taken = mutableMapOf<HexKey, TakenKeyPackage>()
-        val verified = mutableMapOf<HexKey, ByteArray>()
-        val refused = mutableMapOf<HexKey, CordnGroupException>()
+            // Phase 1, before anything is committed: take and verify every
+            // KeyPackage. A failure here spends a KeyPackage for the targets
+            // already taken and nothing else -- the group has not moved.
+            val taken = mutableMapOf<HexKey, TakenKeyPackage>()
+            val verified = mutableMapOf<HexKey, ByteArray>()
+            val refused = mutableMapOf<HexKey, CordnGroupException>()
 
-        targetPubKeys.distinct().forEach { target ->
-            val held = call { coordinator.takeKeyPackage(target) }
-            if (held == null) {
-                refused[target] =
-                    CordnGroupException(
-                        "the coordinator holds no KeyPackage for $target",
-                        CordnGroupException.Reason.NO_KEY_PACKAGE,
-                    )
-                return@forEach
+            targetPubKeys.distinct().forEach { target ->
+                val held = call { coordinator.takeKeyPackage(target) }
+                if (held == null) {
+                    refused[target] =
+                        CordnGroupException(
+                            "the coordinator holds no KeyPackage for $target",
+                            CordnGroupException.Reason.NO_KEY_PACKAGE,
+                        )
+                    return@forEach
+                }
+                val owner = KeyPackagePublication.verify(held.publicationEvent)
+                if (owner.pubKey != target) {
+                    refused[target] =
+                        CordnGroupException(
+                            "the KeyPackage served for $target belongs to ${owner.pubKey}",
+                            CordnGroupException.Reason.WRONG_KEY_PACKAGE_OWNER,
+                        )
+                    return@forEach
+                }
+                taken[target] = held
+                verified[target] = owner.bytes
             }
-            val owner = KeyPackagePublication.verify(held.publicationEvent)
-            if (owner.pubKey != target) {
-                refused[target] =
-                    CordnGroupException(
-                        "the KeyPackage served for $target belongs to ${owner.pubKey}",
-                        CordnGroupException.Reason.WRONG_KEY_PACKAGE_OWNER,
-                    )
-                return@forEach
+
+            if (verified.isEmpty()) return@withGroup BatchInviteResult(gid, emptyList(), emptyMap(), refused)
+
+            // Phase 2: one commit, one post, confirmed. The Welcome is the same
+            // for every joiner: RFC 9420 §12.4.3.1 puts a separate
+            // EncryptedGroupSecrets per added member inside it, keyed by KeyPackage
+            // reference, so each one finds its own.
+            val committed =
+                stageAndPost(gid, welcomeTo = verified.keys.map { it to taken.getValue(it).keyPackageRef }) { group ->
+                    verified.values.forEach { group.proposeAdd(it) }
+                    group.stageCommit()
+                }
+
+            // Phase 3: a Welcome that failed to store is per-target and harmless to
+            // the group. The Commit is confirmed, so the group already counts them a
+            // member -- they simply have no Welcome to join with. Reported rather
+            // than thrown, because the others succeeded.
+            val invited = mutableListOf<InviteResult>()
+            val undelivered = mutableMapOf<HexKey, Throwable>()
+            verified.keys.forEach { target ->
+                committed.welcomes.getValue(target).fold(
+                    onSuccess = { at -> invited += InviteResult(gid, target, taken.getValue(target).keyPackageRef, committed.cursor, at) },
+                    onFailure = { undelivered[target] = it },
+                )
             }
-            taken[target] = held
-            verified[target] = owner.bytes
+
+            BatchInviteResult(gid, invited, undelivered, refused)
         }
-
-        if (verified.isEmpty()) return BatchInviteResult(gid, emptyList(), emptyMap(), refused)
-
-        // Phase 2: one commit, one post, confirmed. The Welcome is the same
-        // for every joiner: RFC 9420 §12.4.3.1 puts a separate
-        // EncryptedGroupSecrets per added member inside it, keyed by KeyPackage
-        // reference, so each one finds its own.
-        val committed =
-            stageAndPost(gid, welcomeTo = verified.keys.map { it to taken.getValue(it).keyPackageRef }) { group ->
-                verified.values.forEach { group.proposeAdd(it) }
-                group.stageCommit()
-            }
-
-        // Phase 3: a Welcome that failed to store is per-target and harmless to
-        // the group. The Commit is confirmed, so the group already counts them a
-        // member -- they simply have no Welcome to join with. Reported rather
-        // than thrown, because the others succeeded.
-        val invited = mutableListOf<InviteResult>()
-        val undelivered = mutableMapOf<HexKey, Throwable>()
-        verified.keys.forEach { target ->
-            committed.welcomes.getValue(target).fold(
-                onSuccess = { at -> invited += InviteResult(gid, target, taken.getValue(target).keyPackageRef, committed.cursor, at) },
-                onFailure = { undelivered[target] = it },
-            )
-        }
-
-        return BatchInviteResult(gid, invited, undelivered, refused)
     }
 
     /**
@@ -413,26 +541,28 @@ class CordnGroupManager(
         require(targetPubKey != accountPubKey) {
             "cordn has no self-removal: committing your own Remove would leave you unable to read the group"
         }
-        prepareToCommit(gid)
-        val group = requireGroup(gid)
+        return withGroup(gid) {
+            prepareToCommit(gid)
+            val group = requireGroup(gid)
 
-        val leafIndex =
-            CordnCredential
-                .membersOf(group)
-                .entries
-                .firstOrNull { it.value == targetPubKey }
-                ?.key
-                ?: throw CordnGroupException(
-                    "$targetPubKey is not a member of $gid",
-                    CordnGroupException.Reason.NOT_A_MEMBER,
-                )
+            val leafIndex =
+                CordnCredential
+                    .membersOf(group)
+                    .entries
+                    .firstOrNull { it.value == targetPubKey }
+                    ?.key
+                    ?: throw CordnGroupException(
+                        "$targetPubKey is not a member of $gid",
+                        CordnGroupException.Reason.NOT_A_MEMBER,
+                    )
 
-        val committed =
-            stageAndPost(gid) {
-                it.proposeRemove(leafIndex)
-                it.stageCommit()
-            }
-        return RemovalResult(gid, targetPubKey, committed.cursor)
+            val committed =
+                stageAndPost(gid) {
+                    it.proposeRemove(leafIndex)
+                    it.stageCommit()
+                }
+            RemovalResult(gid, targetPubKey, committed.cursor)
+        }
     }
 
     /**
@@ -474,51 +604,63 @@ class CordnGroupManager(
     suspend fun updateGroupMetadata(
         gid: String,
         change: (CordnGroupMetadata) -> CordnGroupMetadata,
-    ): MetadataUpdateResult {
-        prepareToCommit(gid)
-        val committed =
-            stageAndPost(gid) { group ->
-                val current = CordnGroupMetadata.fromExtensions(group.extensions) ?: CordnGroupMetadata(name = "")
-                val kept = group.extensions.filterNot { it.extensionType == CordnGroupMetadata.EXTENSION_TYPE }
-                group.proposeGroupContextExtensions(kept + change(current).toExtension())
-                group.stageCommit()
-            }
-        return MetadataUpdateResult(gid, committed.cursor)
-    }
+    ): MetadataUpdateResult =
+        withGroup(gid) {
+            prepareToCommit(gid)
+            val committed =
+                stageAndPost(gid) { group ->
+                    val current = CordnGroupMetadata.fromExtensions(group.extensions) ?: CordnGroupMetadata(name = "")
+                    val kept = group.extensions.filterNot { it.extensionType == CordnGroupMetadata.EXTENSION_TYPE }
+                    group.proposeGroupContextExtensions(kept + change(current).toExtension())
+                    group.stageCommit()
+                }
+            MetadataUpdateResult(gid, committed.cursor)
+        }
 
     // ---- the commit lifecycle -------------------------------------------
 
     /**
      * What every Commit of ours does before it is built (`multi-device.md` §10.5, cordn-web
-     * 0.5.2/0.5.3).
+     * 0.5.2/0.5.3). Runs under [gid]'s lock, which the caller holds until its Commit is settled.
      *
-     * 1. **Catch up.** A Commit built on an epoch the group has left is one nobody can apply.
-     *    This is also what settles an earlier Commit of ours whose fate was unknown: its echo
-     *    on the stream applies it, and its absence from a stream read to the end means it never
-     *    landed, so it is dropped ([Delivery.CommitLost]) instead of left in the way.
-     * 2. **Refuse while behind.** A payload none of our keys opened is evidence of a Commit we
-     *    missed. A Commit staged from that view splits the group (seen live upstream: a join
-     *    approved from ten epochs back), so it is refused until a payload sealed for our epoch
-     *    proves we are on the group's line.
+     * 1. **Catch up, to the end.** A Commit built on an epoch the group has left is one nobody
+     *    can apply. "The end" is an empty page, never a page budget running out: an earlier
+     *    Commit of ours whose echo sits past that budget would otherwise be taken for one that
+     *    never landed, and dropping it forks the group the moment its echo is read.
+     * 2. **Refuse while behind.** A payload none of our keys opened, or a Commit at our epoch that
+     *    would not apply, is evidence of a Commit we missed. A Commit staged from that view splits
+     *    the group (seen live upstream: a join approved from ten epochs back), so it is refused
+     *    until a payload sealed for our epoch is read successfully.
+     * 3. **Settle an earlier Commit of ours.** Its echo, if it is on the stream, was applied by
+     *    step 1. Still outstanding after a read to the end, it never landed: it is dropped
+     *    ([Delivery.CommitLost]) instead of left in the way, but stays recognisable, so an echo
+     *    that comes late after all is still known as ours (and merged, while the group has not
+     *    moved).
+     * 4. **Deliver what is owed.** Welcomes of Commits confirmed by a sync rather than by their
+     *    call.
      *
      * A failed catch-up throws: a device that cannot read the stream cannot know it is current.
      */
     private suspend fun prepareToCommit(gid: String) {
         requireGroup(gid)
         readToTheEnd(gid)
-        flushConfirmedWelcomes()
+        flushOwedWelcomes(gid)
 
-        if (requireGroup(gid).hasPendingCommit) {
-            discardStagedCommit(gid)
-            deliveryListener(Delivery.CommitLost(gid, sync.inbox(gid).cursor.lastCursor))
-        }
-
-        if (sync.inbox(gid).unopenable > 0) {
+        val inbox = sync.inbox(gid)
+        if (inbox.unopenable > 0) {
             throw CordnGroupException(
-                "$gid has ${sync.inbox(gid).unopenable} payloads this device could not open; it may have missed a change",
+                "$gid has ${inbox.unopenable} payloads this device could not open or apply; it may have missed a change",
                 CordnGroupException.Reason.BEHIND,
             )
         }
+
+        inbox.pending().filter { !it.localStateApplied }.forEach { settleLost(gid, it, keepForLateEcho = true, cursor = inbox.cursor.lastCursor, emit = deliveryListener) }
+        if (requireGroup(gid).hasPendingCommit) {
+            // Staged with no record of it (a store that lost the record): nothing can confirm it.
+            discardStagedCommit(gid)
+            deliveryListener(Delivery.CommitLost(gid, inbox.cursor.lastCursor))
+        }
+        persist(gid)
     }
 
     /** What [stageAndPost] confirmed: where the Commit landed, and each Welcome's fate. */
@@ -529,6 +671,7 @@ class CordnGroupManager(
 
     /**
      * Builds a Commit with [stage], posts it, and returns once the stream says it happened.
+     * Runs under [gid]'s lock.
      *
      * The Commit is **staged, not applied** ([MlsGroup.stageCommit]): the group stays on its
      * epoch until the coordinator's order says ours came first. That is the whole difference
@@ -537,13 +680,15 @@ class CordnGroupManager(
      *
      * 1. Stage the Commit and record it as expected, and **persist both before posting**: a
      *    crash after the post must not leave a Commit on the stream this device can neither
-     *    recognise nor apply. The staged Commit is part of the saved MLS state.
+     *    recognise nor apply. The staged Commit is part of the saved MLS state. A save that
+     *    fails undoes the staging: nothing was sent.
      * 2. Post it, sealed under the epoch it leaves (`spec/03.md` §5).
      * 3. Read the stream until its echo. Ours first: the echo merges the staged Commit. Someone
      *    else's Commit from the same epoch first: applying theirs discards ours, and this throws
      *    [CordnGroupException.Reason.COMMIT_LOST]. Nothing changed; try again.
      * 4. Only then store the Welcomes, at the Commit's cursor. A Welcome into a branch nobody is
-     *    on is an invitation nobody can use.
+     *    on is an invitation nobody can use. One that fails to store stays owed, on disk, and a
+     *    later sync stores it.
      *
      * A post or a confirmation that fails is **ambiguous**: the Commit may or may not be on the
      * stream. It stays staged, with its Welcomes, and this throws
@@ -556,9 +701,11 @@ class CordnGroupManager(
         welcomeTo: List<Pair<HexKey, String>> = emptyList(),
         stage: (MlsGroup) -> CommitResult,
     ): Committed {
+        val slot = requireSlot(gid)
+        val fromEpoch = slot.group.epoch
         val result =
             try {
-                stage(requireGroup(gid))
+                stage(slot.group)
             } catch (e: Exception) {
                 // stageCommit puts the group back, but the proposals made for
                 // it stay in the pool, where the next Commit would pick them up.
@@ -575,64 +722,92 @@ class CordnGroupManager(
         // Commit struct with no MLSMessage around it, which no receiver can
         // parse. preCommitExporterSecret is the key of the epoch it leaves.
         val sealed = SealedPayload.seal(result.framedCommitBytes, result.preCommitExporterSecret)
-        val welcomes =
-            welcomeTo.map { (target, ref) -> DeferredWelcome(target, ref, Base64.encode(checkNotNull(welcomeBytes))) }
-        sync.expectCommitEcho(gid, PendingEpochOperation(sealed, localStateApplied = false, welcomes = welcomes))
-        persist(gid)
+        // One Welcome serves every joiner (RFC 9420 §12.4.3.1), so it is encoded and kept once.
+        val welcomeBase64 = welcomeBytes?.let { Base64.encode(it) }
+        val welcomes = welcomeTo.map { (target, ref) -> DeferredWelcome(target, ref, checkNotNull(welcomeBase64)) }
+        val inbox = sync.inbox(gid)
+        inbox.expectEcho(PendingEpochOperation(sealed, localStateApplied = false, welcomes = welcomes, fromEpoch = fromEpoch))
+        slot.dirty = true
+        try {
+            persist(gid)
+        } catch (e: Exception) {
+            // Durability before visibility: what was not saved is not posted, and nothing of it
+            // stays to be confirmed or retried by accident.
+            inbox.forget(sealed)
+            discardStagedCommit(gid)
+            if (e is CancellationException) throw e
+            throw CordnGroupException("the commit to $gid could not be saved, so it was not sent: ${e.message}", cause = e)
+        }
 
-        val posted =
+        inFlight[sealed] = CommitOutcome.WAITING
+        try {
+            val posted =
+                try {
+                    call { sync.postRegisteredCommit(gid, sealed) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw CordnGroupException(
+                        "posting the commit to $gid failed; it may still land: ${e.message}",
+                        CordnGroupException.Reason.COMMIT_UNCONFIRMED,
+                        e,
+                    )
+                }
+
             try {
-                call { sync.postRegisteredCommit(gid, sealed) }
+                readToTheEnd(gid)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 throw CordnGroupException(
-                    "posting the commit to $gid failed; it may still land: ${e.message}",
+                    "the commit to $gid was posted at ${posted.cursor} and could not be confirmed: ${e.message}",
                     CordnGroupException.Reason.COMMIT_UNCONFIRMED,
                     e,
                 )
             }
 
-        try {
-            readToTheEnd(gid)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            throw CordnGroupException(
-                "the commit to $gid was posted at ${posted.cursor} and could not be confirmed: ${e.message}",
-                CordnGroupException.Reason.COMMIT_UNCONFIRMED,
-                e,
-            )
-        }
+            when (inFlight[sealed]) {
+                CommitOutcome.APPLIED -> {
+                    // Ours: its Welcomes are this call's to store, with per-target results.
+                    val stored = storeOwedWelcomes(gid, sealed)
+                    persistQuietly(gid)
+                    return Committed(posted.cursor, stored)
+                }
 
-        when (commitOutcomes.remove(sealed)) {
-            true -> {
-                // Ours: its Welcomes are this call's to store, with per-target results.
-                confirmedWelcomes[gid]?.removeAll { (welcome, _) -> welcome in welcomes }
-                val stored = welcomes.associate { it.targetPubKey to storeWelcome(it, posted.cursor) }
-                return Committed(posted.cursor, stored)
-            }
+                CommitOutcome.LOST -> {
+                    throw CordnGroupException(
+                        "another commit to $gid was sequenced first; this change did not happen",
+                        CordnGroupException.Reason.COMMIT_LOST,
+                    )
+                }
 
-            false -> {
-                throw CordnGroupException(
-                    "another commit to $gid was sequenced first; this change did not happen",
-                    CordnGroupException.Reason.COMMIT_LOST,
-                )
+                else -> {
+                    throw CordnGroupException(
+                        "the commit to $gid was posted at ${posted.cursor} and its echo has not come back",
+                        CordnGroupException.Reason.COMMIT_UNCONFIRMED,
+                    )
+                }
             }
-
-            null -> {
-                throw CordnGroupException(
-                    "the commit to $gid was posted at ${posted.cursor} and its echo has not come back",
-                    CordnGroupException.Reason.COMMIT_UNCONFIRMED,
-                )
-            }
+        } finally {
+            inFlight.remove(sealed)
         }
     }
 
-    /** Reads [gid]'s stream to the end, delivering to [deliveryListener], and persists. */
+    /**
+     * Reads [gid]'s stream until a page comes back empty, delivering to [deliveryListener], and
+     * persists. Runs under [gid]'s lock.
+     *
+     * No page budget: a decision made on "read to the end" (that a Commit of ours never landed,
+     * that the group is current enough to commit on) is wrong when the end was not reached.
+     * Throws when the coordinator stops serving progress before an empty page.
+     */
     private suspend fun readToTheEnd(gid: String) {
-        call { sync.catchUp(listOf(gid)) { g, ingestion -> deliveryListener(ingest(g, ingestion)) } }
-        persist(gid)
+        val drained =
+            call { sync.drain(listOf(gid), maxPages = Int.MAX_VALUE) { g, ingestion -> ingest(g, ingestion, deliveryListener) } }
+        persistQuietly(gid)
+        if (!drained.current) {
+            throw CordnGroupException("the coordinator stopped serving $gid's stream before its end")
+        }
     }
 
     private suspend fun storeWelcome(
@@ -657,44 +832,118 @@ class CordnGroupManager(
         }
 
     /**
-     * Stores the Welcomes of Commits confirmed by a sync rather than by the call that made them.
-     * One that fails stays queued for the next attempt.
+     * Stores the Welcomes the confirmed Commit [sealed] still owes, at the cursor it landed at.
+     * Each one stored leaves the record; one that fails stays, on disk, for the next attempt.
+     * The record is only ever touched under the group's lock, so no Welcome is stored twice.
      */
-    private suspend fun flushConfirmedWelcomes() {
-        confirmedWelcomes.keys.toList().forEach { gid ->
-            val queued = confirmedWelcomes.remove(gid) ?: return@forEach
-            val failed = queued.filter { (welcome, after) -> storeWelcome(welcome, after).isFailure }
-            if (failed.isNotEmpty()) confirmedWelcomes.getOrPut(gid) { mutableListOf() } += failed
+    private suspend fun storeOwedWelcomes(
+        gid: String,
+        sealed: String,
+    ): Map<HexKey, Result<Long>> {
+        val inbox = sync.inbox(gid)
+        val op = inbox.operation(sealed) ?: return emptyMap()
+        val after = op.landedAt ?: return emptyMap()
+        if (op.status != PendingEpochOperation.Status.CONFIRMED || op.welcomes.isEmpty()) return emptyMap()
+        val results = op.welcomes.associate { it.targetPubKey to storeWelcome(it, after) }
+        inbox.update(op.copy(welcomes = op.welcomes.filter { results[it.targetPubKey]?.isFailure == true }))
+        return results
+    }
+
+    /**
+     * Stores the Welcomes of [gid]'s Commits confirmed by a sync rather than by the call that made
+     * them, or whose store failed before. Runs under [gid]'s lock.
+     */
+    private suspend fun flushOwedWelcomes(gid: String) {
+        val owed =
+            sync.inbox(gid).operations().filter {
+                it.status == PendingEpochOperation.Status.CONFIRMED && it.welcomes.isNotEmpty() && inFlight[it.sealedBase64] == null
+            }
+        if (owed.isEmpty()) return
+        owed.forEach { storeOwedWelcomes(gid, it.sealedBase64) }
+        persistQuietly(gid)
+    }
+
+    /**
+     * Settles our Commit [op] as one that did not happen: the group drops it if it is still
+     * staged, the record keeps only what recognises its echo, and the loss is reported once, to
+     * the call waiting on it or else to [emit].
+     *
+     * [keepForLateEcho]: the stream was read to the end without it, so it may yet land late. Its
+     * staged state is kept in memory to merge it then, while the group is still on its epoch.
+     */
+    private fun settleLost(
+        gid: String,
+        op: PendingEpochOperation,
+        keepForLateEcho: Boolean,
+        cursor: Long,
+        emit: (Delivery) -> Unit,
+    ) {
+        val slot = requireSlot(gid)
+        if (slot.group.hasPendingCommit) {
+            if (keepForLateEcho && op.fromEpoch == slot.group.epoch) {
+                stagedFor(slot, op.sealedBase64)?.let { lostStaged[op.sealedBase64] = LostCommit(gid, it, op.welcomes) }
+            }
+            discardStagedCommit(gid)
+        }
+        sync.inbox(gid).update(op.copy(status = PendingEpochOperation.Status.LOST, welcomes = emptyList()))
+        reportLost(gid, op.sealedBase64, cursor, emit)
+    }
+
+    /** The group's staged Commit, when it is the one sealed as [sealed]. */
+    private fun stagedFor(
+        slot: Slot,
+        sealed: String,
+    ): StagedCommitState? {
+        val staged = slot.group.saveState().pendingCommit ?: return null
+        val opened = runCatching { SealedPayload.open(sealed, keysOf(slot).payload) }.getOrNull() ?: return null
+        return staged.takeIf { it.result.framedCommitBytes.contentEquals(opened) }
+    }
+
+    /** One "change lost" per Commit: to the call still waiting on it, or else to [emit]. */
+    private fun reportLost(
+        gid: String,
+        sealed: String,
+        cursor: Long,
+        emit: (Delivery) -> Unit,
+    ) {
+        if (inFlight[sealed] != null) {
+            inFlight[sealed] = CommitOutcome.LOST
+        } else {
+            emit(Delivery.CommitLost(gid, cursor))
         }
     }
 
     /**
-     * Forgets a staged Commit that never landed, and the proposals made for it.
+     * Forgets a staged Commit that never landed, and the proposals made for it. In memory: the
+     * caller persists.
      *
      * [MlsGroup.clearPendingCommit] alone would leave our Add or Remove in the proposal pool,
      * where the next Commit would carry it along unasked. Proposals made here and never sent
      * have no reference; somebody else's have one and stay.
      */
-    private suspend fun discardStagedCommit(gid: String) {
-        val state = requireGroup(gid).saveState()
-        groups[gid] =
+    private fun discardStagedCommit(gid: String) {
+        val slot = requireSlot(gid)
+        val state = slot.group.saveState()
+        slot.group =
             MlsGroup.restore(
                 state.copy(pendingCommit = null, pendingProposals = state.pendingProposals.filter { it.authenticatedContentBytes != null }),
                 CordnGroupPolicy,
             )
-        persist(gid)
+        slot.dirty = true
+        keysOf(slot)
     }
 
     /** As [discardStagedCommit], for proposals a Commit that failed to build left in the pool. */
     private fun dropLocalProposals(gid: String) {
-        val group = groups[gid] ?: return
-        if (group.hasPendingCommit) return
-        val state = group.saveState()
-        groups[gid] = MlsGroup.restore(state.copy(pendingProposals = state.pendingProposals.filter { it.authenticatedContentBytes != null }), CordnGroupPolicy)
+        val slot = groups[gid] ?: return
+        if (slot.group.hasPendingCommit) return
+        val state = slot.group.saveState()
+        slot.group = MlsGroup.restore(state.copy(pendingProposals = state.pendingProposals.filter { it.authenticatedContentBytes != null }), CordnGroupPolicy)
+        slot.dirty = true
     }
 
-    /** Whether [gid] has seen payloads it could not open since the last one sealed for its epoch. */
-    fun mayBeBehind(gid: String): Boolean = gid in groups && sync.inbox(gid).unopenable > 0
+    /** Whether [gid] has seen payloads it could not open, or Commits it could not apply, since the last one it read at its epoch. */
+    fun mayBeBehind(gid: String): Boolean = groups[gid] != null && sync.inbox(gid).unopenable > 0
 
     /**
      * The media key for [message]'s attachments: the one captured with it, or, for a message
@@ -704,7 +953,7 @@ class CordnGroupManager(
     fun mediaKeyFor(
         gid: String,
         message: CordnDeliveredMessage,
-    ): ByteArray? = message.mediaKey ?: groups[gid]?.let { CordnMediaEncryption.mediaKey(it) }
+    ): ByteArray? = message.mediaKey ?: groups[gid]?.let { slot -> slot.keys?.media ?: CordnMediaEncryption.mediaKey(slot.group) }
 
     /**
      * Opens every pending Welcome without joining anything.
@@ -741,7 +990,7 @@ class CordnGroupManager(
             try {
                 call { coordinator.takeWelcomes(acks) }
             } catch (e: Exception) {
-                pendingRetirements += acks
+                retirementLock.withLock { pendingRetirements += acks }
                 throw e
             }
         val opened = mutableListOf<OpenedWelcome>()
@@ -766,7 +1015,7 @@ class CordnGroupManager(
                 skipped += SkippedWelcome(welcome.keyPackageRef, UNKNOWN_GID)
                 return@forEach
             }
-            if (gid in groups) {
+            if (groups[gid] != null) {
                 skipped += SkippedWelcome(welcome.keyPackageRef, ALREADY_A_MEMBER)
                 stale += ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)
                 return@forEach
@@ -803,15 +1052,17 @@ class CordnGroupManager(
      * after the rolled-back epoch stops decrypting, silently and permanently.
      */
     suspend fun accept(welcome: OpenedWelcome): String {
-        require(welcome.gid !in groups) { "already in a group with gid ${welcome.gid}" }
+        withGroup(welcome.gid) {
+            require(groups[welcome.gid] == null) { "already in a group with gid ${welcome.gid}" }
 
-        groups[welcome.gid] = welcome.group
-        // `after` is the inviter saying where this member's history starts.
-        // Without it a joiner replays epochs from before it existed and
-        // every one lands as Undecryptable.
-        welcome.after?.let { sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor.advancedTo(it)) }
-        persist(welcome.gid)
-        _gids.value = groups.keys.toSet()
+            groups[welcome.gid] = Slot(welcome.group)
+            // `after` is the inviter saying where this member's history starts.
+            // Without it a joiner replays epochs from before it existed and
+            // every one lands as Undecryptable.
+            welcome.after?.let { sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor.advancedTo(it)) }
+            persist(welcome.gid)
+        }
+        publishGids()
 
         retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
         return welcome.gid
@@ -861,16 +1112,17 @@ class CordnGroupManager(
         try {
             call { coordinator.takeWelcomes(refs) }
         } catch (e: Exception) {
-            pendingRetirements += refs
+            retirementLock.withLock { pendingRetirements += refs }
             currentCoroutineContext().ensureActive()
         }
     }
 
-    private fun drainRetirements(): List<ConsumedWelcomeRef> {
-        val queued = pendingRetirements.toList()
-        pendingRetirements.clear()
-        return queued
-    }
+    private fun drainRetirements(): List<ConsumedWelcomeRef> =
+        retirementLock.withLock {
+            val queued = pendingRetirements.toList()
+            pendingRetirements.clear()
+            queued
+        }
 
     // ---- join requests --------------------------------------------------
 
@@ -918,7 +1170,7 @@ class CordnGroupManager(
         // group that names admins a non-admin asking for the list would be
         // shown people it can only fail to let in. Egalitarian groups name no
         // admins and so are all still here.
-        val administered = groups.filterValues { CordnGroupPolicy.isLocalAdmin(it.view()) }.keys.toList()
+        val administered = gidList().filter { gid -> withGroup(gid) { groups[gid]?.group?.let { CordnGroupPolicy.isLocalAdmin(it.view()) } == true } }
         if (administered.isEmpty()) return emptyList()
         return call { coordinator.takeJoinRequests(administered, drainRequestRetirements()) }
     }
@@ -943,20 +1195,22 @@ class CordnGroupManager(
 
     /** As [retire], for join requests: `join_request_take_many` carries the acks. */
     private suspend fun retireRequests(refs: List<ConsumedJoinRequestRef>) {
-        if (refs.isEmpty() || groups.isEmpty()) return
+        val gids = gidList()
+        if (refs.isEmpty() || gids.isEmpty()) return
         try {
-            call { coordinator.takeJoinRequests(groups.keys.toList(), refs) }
+            call { coordinator.takeJoinRequests(gids, refs) }
         } catch (e: Exception) {
-            pendingRequestRetirements += refs
+            retirementLock.withLock { pendingRequestRetirements += refs }
             currentCoroutineContext().ensureActive()
         }
     }
 
-    private fun drainRequestRetirements(): List<ConsumedJoinRequestRef> {
-        val queued = pendingRequestRetirements.toList()
-        pendingRequestRetirements.clear()
-        return queued
-    }
+    private fun drainRequestRetirements(): List<ConsumedJoinRequestRef> =
+        retirementLock.withLock {
+            val queued = pendingRequestRetirements.toList()
+            pendingRequestRetirements.clear()
+            queued
+        }
 
     // ---- messages --------------------------------------------------------
 
@@ -1016,44 +1270,60 @@ class CordnGroupManager(
      * the echo would have — [CordnGroupChatroom.ORDER] sorts on it, and a
      * guessed one would put your own message in the wrong place until the
      * echo corrected it.
+     *
+     * The ratchet step that sealed it is saved **before** the post: a restart that had not
+     * saved it would seal the next message under the same key and nonce. After a successful
+     * post nothing throws: the message is out, and a failed save of its record is retried by the
+     * next one rather than turned into an error that invites sending it twice.
      */
     suspend fun send(
         gid: String,
         content: String,
         kind: Int = CHAT_KIND,
         tags: Array<Array<String>> = emptyArray(),
-    ): CordnDeliveredMessage {
-        val group = requireGroup(gid)
-        val envelope =
-            CordnEnvelope.build(
-                pubKey = accountPubKey,
-                createdAt = clock(),
-                kind = kind,
-                tags = tags,
-                content = content,
-            )
-        val sealed = CordnApplicationMessage.seal(group, accountPubKey, envelope)
-        // The epoch it is sealed at is the epoch its attachments were sealed
-        // for, so this is the key that opens them later.
-        val mediaKey = CordnMediaEncryption.mediaKey(group)
-        val posted = call { sync.postMessage(gid, sealed) }
-        // Our own message never arrives as a Delivery.Message — it comes back
-        // as an Echo, which by design carries nothing — so the only place it
-        // can be recorded is here, where we still hold the plaintext.
-        val delivered = CordnDeliveredMessage(envelope, posted.cursor, mediaKey)
-        queueForStore(gid, delivered)
-        persist(gid)
-        return delivered
-    }
+    ): CordnDeliveredMessage =
+        withGroup(gid) {
+            val slot = requireSlot(gid)
+            val envelope =
+                CordnEnvelope.build(
+                    pubKey = accountPubKey,
+                    createdAt = clock(),
+                    kind = kind,
+                    tags = tags,
+                    content = content,
+                )
+            val sealed = CordnApplicationMessage.seal(slot.group, accountPubKey, envelope)
+            // The epoch it is sealed at is the epoch its attachments were sealed
+            // for, so this is the key that opens them later.
+            val mediaKey = keysOf(slot).media
+            slot.dirty = true
+            persist(gid)
+
+            val posted = call { sync.postMessage(gid, sealed) }
+            // Our own message never arrives as a Delivery.Message — it comes back
+            // as an Echo, which by design carries nothing — so the only place it
+            // can be recorded is here, where we still hold the plaintext.
+            val delivered = CordnDeliveredMessage(envelope, posted.cursor, mediaKey)
+            slot.pendingMessages.addLast(delivered)
+            persistQuietly(gid)
+            delivered
+        }
 
     /** Drains history for every group this manager holds. */
     override suspend fun catchUp(onDelivery: (Delivery) -> Unit): Int {
-        if (groups.isEmpty()) return 0
-        return call { sync.catchUp(groups.keys.toList()) { gid, ingestion -> onDelivery(ingest(gid, ingestion)) } }
-            .also {
-                persistAll()
-                flushConfirmedWelcomes()
+        val gids = gidList()
+        if (gids.isEmpty()) return 0
+        val drained =
+            call {
+                sync.drain(gids, guard = { gid, deliver -> withGroup(gid) { deliver() } }) { gid, ingestion -> ingest(gid, ingestion, onDelivery) }
             }
+        gids.forEach { gid ->
+            withGroup(gid) {
+                persistQuietly(gid)
+                flushOwedWelcomes(gid)
+            }
+        }
+        return drained.delivered
     }
 
     /**
@@ -1070,9 +1340,12 @@ class CordnGroupManager(
         timeoutMs: Long,
         onDelivery: (Delivery) -> Unit,
     ) {
-        if (groups.isEmpty()) return
+        val gids = gidList()
+        if (gids.isEmpty()) return
         try {
-            call { sync.subscribe(groups.keys.toList(), timeoutMs) { gid, ingestion -> onDelivery(ingest(gid, ingestion)) } }
+            call {
+                sync.subscribe(gids, timeoutMs, guard = { gid, deliver -> withGroup(gid) { deliver() } }) { gid, ingestion -> ingest(gid, ingestion, onDelivery) }
+            }
         } finally {
             // finally, not after: a subscription normally ends by timing out or
             // being cancelled, and those are the cases with progress to keep.
@@ -1086,56 +1359,166 @@ class CordnGroupManager(
         }
     }
 
+    /** Ingests one message of [gid]'s stream, under [gid]'s lock, reporting each outcome to [emit]. */
     private fun ingest(
         gid: String,
         ingestion: Ingestion,
-    ): Delivery {
-        val group = groups[gid] ?: return Delivery.Undecryptable(gid, ingestion.cursor, "no such group")
+        emit: (Delivery) -> Unit,
+    ) {
+        val slot = groups[gid] ?: return emit(Delivery.Undecryptable(gid, ingestion.cursor, "no such group"))
 
-        return when (ingestion) {
-            is Ingestion.OwnMessage -> Delivery.Echo(gid, ingestion.cursor)
+        when (ingestion) {
+            is Ingestion.OwnMessage -> {
+                emit(Delivery.Echo(gid, ingestion.cursor))
+            }
+
             // Our own Commit, already applied locally when we posted it (what
             // this manager did before commits were staged).
-            is Ingestion.SelfEchoConfirmed -> Delivery.Echo(gid, ingestion.cursor)
+            is Ingestion.SelfEchoConfirmed -> {
+                emit(Delivery.Echo(gid, ingestion.cursor))
+            }
+
             // Our own Commit, staged and not yet applied: the echo is what
             // tells us it came first. Also how a client that died between the
             // post and the confirmation recovers.
-            is Ingestion.SelfEchoUnapplied -> ingestOwnCommit(gid, group, ingestion)
-            is Ingestion.Process -> ingestPayload(gid, group, ingestion.cursor, ingestion.sealedBase64)
+            is Ingestion.SelfEchoUnapplied -> {
+                slot.dirty = true
+                ingestOwnCommit(gid, slot, ingestion, emit)
+            }
+
+            is Ingestion.Process -> {
+                slot.dirty = true
+                ingestPayload(gid, slot, ingestion.cursor, ingestion.sealedBase64, emit)
+            }
         }
     }
 
     /**
-     * Our own staged Commit, back from the stream.
+     * Our own Commit, back from the stream. What it means depends on what we already decided
+     * about it:
      *
-     * Processing it merges the staged Commit ([MlsGroup.processFramedCommit] recognises its own
-     * bytes). When somebody else's Commit from the same epoch came first, applying theirs already
-     * discarded ours: this echo then opens under a key we no longer use, or not as a Commit we can
-     * apply, and it is the evidence that our change lost. Neither case is a gap in the
-     * conversation, and neither is evidence that we are behind.
+     * - **Pending**: processing it merges the staged Commit ([MlsGroup.processFramedCommit]
+     *   recognises its own bytes). When somebody else's Commit from the same epoch came first,
+     *   applying theirs already discarded ours: this echo then is the evidence that our change
+     *   lost. Neither case is a gap in the conversation, and neither is evidence that we are
+     *   behind.
+     * - **Lost**, after a read to the end did not hold it: it landed late after all. While the
+     *   group is still on the epoch it was built at, the kept staged state is put back and
+     *   merged, which is what every other member does with it; otherwise it was already reported.
+     * - **Confirmed**: a crash between saves delivered it again. Merged again if the saved group
+     *   predates it.
      */
     private fun ingestOwnCommit(
         gid: String,
-        group: MlsGroup,
+        slot: Slot,
         ingestion: Ingestion.SelfEchoUnapplied,
-    ): Delivery {
-        val before = group.epoch
-        val applied =
-            try {
-                group.hasPendingCommit &&
-                    applyHandshake(group, SealedPayload.open(ingestion.sealedBase64, SealedPayload.applicationKey(group))) &&
-                    group.epoch == before + 1
-            } catch (e: Exception) {
-                false
-            }
-        commitOutcomes[ingestion.sealedBase64] = applied
-        if (!applied) return Delivery.CommitLost(gid, ingestion.cursor)
+        emit: (Delivery) -> Unit,
+    ) {
+        val inbox = sync.inbox(gid)
+        val sealed = ingestion.sealedBase64
+        val op = inbox.operation(sealed) ?: PendingEpochOperation(sealed, localStateApplied = false, welcomes = ingestion.welcomes)
 
-        sync.inbox(gid).noteCurrentEpochReadable()
-        if (ingestion.welcomes.isNotEmpty()) {
-            confirmedWelcomes.getOrPut(gid) { mutableListOf() } += ingestion.welcomes.map { it to ingestion.cursor }
+        when (op.status) {
+            PendingEpochOperation.Status.PENDING -> {
+                if (applyOwnCommit(gid, slot, sealed)) {
+                    confirm(gid, slot, op, ingestion.cursor, emit)
+                } else {
+                    lostStaged.remove(sealed)
+                    inbox.update(op.copy(status = PendingEpochOperation.Status.LOST, welcomes = emptyList(), landedAt = ingestion.cursor))
+                    reportLost(gid, sealed, ingestion.cursor, emit)
+                }
+            }
+
+            PendingEpochOperation.Status.LOST -> {
+                val late = lostStaged.remove(sealed)
+                inbox.update(op.copy(landedAt = ingestion.cursor))
+                if (late != null && late.staged.fromEpoch == slot.group.epoch && mergeLate(gid, slot, sealed, late)) {
+                    confirm(gid, slot, op.copy(welcomes = late.welcomes), ingestion.cursor, emit)
+                } else {
+                    emit(Delivery.Echo(gid, ingestion.cursor))
+                }
+            }
+
+            PendingEpochOperation.Status.CONFIRMED -> {
+                if (slot.group.hasPendingCommit && applyOwnCommit(gid, slot, sealed)) {
+                    inbox.noteCurrentEpochReadable()
+                    afterEpochChange(gid, slot, ingestion.cursor, emit)
+                    emit(Delivery.EpochAdvanced(gid, ingestion.cursor, slot.group.epoch))
+                } else {
+                    emit(Delivery.Echo(gid, ingestion.cursor))
+                }
+            }
         }
-        return Delivery.EpochAdvanced(gid, ingestion.cursor, group.epoch)
+    }
+
+    /** Merges our staged Commit [sealed] by processing its echo; false when it does not apply. */
+    private fun applyOwnCommit(
+        gid: String,
+        slot: Slot,
+        sealed: String,
+    ): Boolean {
+        val group = slot.group
+        if (!group.hasPendingCommit) return false
+        val before = group.epoch
+        return try {
+            applyHandshake(group, SealedPayload.open(sealed, keysOf(slot).payload)) && group.epoch == before + 1
+        } catch (e: Exception) {
+            // The one place a fork shows itself: our own Commit, back from the stream, refused.
+            Log.w(TAG, "our own commit to $gid did not apply at epoch $before", e)
+            false
+        }
+    }
+
+    /** Puts [late]'s staged Commit back and merges it. The group is left as it was when it does not apply. */
+    private fun mergeLate(
+        gid: String,
+        slot: Slot,
+        sealed: String,
+        late: LostCommit,
+    ): Boolean {
+        val current = slot.group.saveState()
+        slot.group = MlsGroup.restore(current.copy(pendingCommit = late.staged), CordnGroupPolicy)
+        if (applyOwnCommit(gid, slot, sealed)) return true
+        slot.group = MlsGroup.restore(current, CordnGroupPolicy)
+        return false
+    }
+
+    /** Our Commit [op] was applied: record it, with the Welcomes it now owes, and tell its call. */
+    private fun confirm(
+        gid: String,
+        slot: Slot,
+        op: PendingEpochOperation,
+        cursor: Long,
+        emit: (Delivery) -> Unit,
+    ) {
+        val inbox = sync.inbox(gid)
+        inbox.update(op.copy(status = PendingEpochOperation.Status.CONFIRMED, landedAt = cursor))
+        inbox.noteCurrentEpochReadable()
+        if (inFlight[op.sealedBase64] != null) inFlight[op.sealedBase64] = CommitOutcome.APPLIED
+        afterEpochChange(gid, slot, cursor, emit)
+        emit(Delivery.EpochAdvanced(gid, cursor, slot.group.epoch))
+    }
+
+    /**
+     * After the group moved to a new epoch: a Commit of ours still waiting from an older epoch
+     * can never apply now (another Commit took its epoch), so it is settled as lost here, once,
+     * instead of when or if its echo shows up. Records too old to matter are dropped.
+     */
+    private fun afterEpochChange(
+        gid: String,
+        slot: Slot,
+        cursor: Long,
+        emit: (Delivery) -> Unit,
+    ) {
+        val epoch = slot.group.epoch
+        val inbox = sync.inbox(gid)
+        inbox.pending().filter { !it.localStateApplied && it.fromEpoch != null && it.fromEpoch < epoch }.forEach {
+            settleLost(gid, it, keepForLateEcho = false, cursor = cursor, emit = emit)
+        }
+        lostStaged.snapshot().forEach { (sealed, late) -> if (late.gid == gid && late.staged.fromEpoch < epoch) lostStaged.remove(sealed) }
+        inbox.pruneLost(epoch, MlsGroup.RETAIN_EPOCHS)
+        // Derived now, under the lock, so [mediaKeyFor] reads the new epoch's key without one.
+        keysOf(slot)
     }
 
     /** Applies a handshake [opened] at the current epoch; true when it was a Commit and applied. */
@@ -1149,59 +1532,92 @@ class CordnGroupManager(
                 true
             }
 
-            else -> group.decrypt(opened).contentType == ContentType.COMMIT
+            else -> {
+                group.decrypt(opened).contentType == ContentType.COMMIT
+            }
+        }
+
+    /** Whether [opened] is a handshake (a Commit or a proposal) rather than an application message. */
+    private fun isHandshake(opened: ByteArray): Boolean =
+        try {
+            val message = MlsMessage.decodeTls(TlsReader(opened))
+            when (message.wireFormat) {
+                WireFormat.PUBLIC_MESSAGE -> true
+                WireFormat.PRIVATE_MESSAGE -> PrivateMessage.decodeTls(TlsReader(message.payload)).contentType != ContentType.APPLICATION
+                else -> false
+            }
+        } catch (e: Exception) {
+            false
         }
 
     private fun ingestPayload(
         gid: String,
-        group: MlsGroup,
+        slot: Slot,
         cursor: Long,
         sealed: String,
-    ): Delivery {
+        emit: (Delivery) -> Unit,
+    ) {
         val inbox = sync.inbox(gid)
+        val payload = runCatching { SealedPayload.decode(sealed) }.getOrNull()
+        if (payload == null) {
+            inbox.noteUnopenable()
+            return emit(Delivery.Undecryptable(gid, cursor, "not a sealed payload"))
+        }
 
         // Our current epoch key opens both an application message sent at
         // this epoch and a Commit leaving it, which is the same key by
         // construction (spec/03.md §5).
-        val opened = runCatching { SealedPayload.open(sealed, SealedPayload.applicationKey(group)) }.getOrNull()
-        if (opened == null) return ingestFromFormerEpoch(gid, group, cursor, sealed)
+        val keys = keysOf(slot)
+        val opened = runCatching { SealedPayload.open(payload, keys.payload) }.getOrNull()
+        if (opened == null) return ingestFromFormerEpoch(gid, slot, cursor, payload, emit)
 
-        // Sealed for our epoch: proof that this device is on the group's line,
-        // whatever MLS then makes of it.
-        inbox.noteCurrentEpochReadable()
-
-        return try {
+        val group = slot.group
+        val epoch = group.epoch
+        try {
             when (MlsMessage.decodeTls(TlsReader(opened)).wireFormat) {
                 // Public-framed handshake: what this engine emits, and what
                 // Marmot uses throughout.
                 WireFormat.PUBLIC_MESSAGE -> {
                     group.processFramedCommit(opened)
-                    Delivery.EpochAdvanced(gid, cursor, group.epoch)
+                    // Read and applied at our epoch: proof that this device is on the group's line.
+                    inbox.noteCurrentEpochReadable()
+                    afterEpochChange(gid, slot, cursor, emit)
+                    emit(Delivery.EpochAdvanced(gid, cursor, group.epoch))
                 }
                 // Private-framed: what cordn's reference client emits, for both
                 // application messages and handshake traffic.
                 else -> {
-                    val epoch = group.epoch
                     val decrypted = group.decrypt(opened)
+                    inbox.noteCurrentEpochReadable()
                     when (decrypted.contentType) {
                         ContentType.APPLICATION -> {
                             val received = CordnApplicationMessage.open(decrypted)
-                            // Derived from the epoch read before decrypting: the
-                            // key that sealed its attachments is this epoch's.
-                            val mediaKey = CordnMediaEncryption.mediaKeyAt(group, epoch)
-                            queueForStore(gid, CordnDeliveredMessage(received.envelope, cursor, mediaKey))
-                            Delivery.Message(gid, cursor, received, mediaKey)
+                            // The key that sealed its attachments is the epoch's it was read at.
+                            val delivered = CordnDeliveredMessage(received.envelope, cursor, keys.media)
+                            slot.pendingMessages.addLast(delivered)
+                            emit(Delivery.Message(gid, cursor, received, keys.media))
                         }
                         // decrypt() applies a Commit, so the epoch has moved already.
-                        else -> Delivery.EpochAdvanced(gid, cursor, group.epoch)
+                        else -> {
+                            if (group.epoch != epoch) afterEpochChange(gid, slot, cursor, emit)
+                            emit(Delivery.EpochAdvanced(gid, cursor, group.epoch))
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
+            // Sealed for our epoch, so from a member who was on it, and still refused: a Commit
+            // like that is the strongest evidence of a change we missed (cordn-web clears its
+            // staleMark only on a successful read). An application message that fails says
+            // nothing about the epoch.
+            if (isHandshake(opened)) {
+                inbox.noteUnopenable()
+                Log.w(TAG, "a commit sealed for $gid's epoch $epoch did not apply", e)
+            }
             // The cursor has already advanced past it. Reporting rather than
             // throwing is what keeps one bad payload from stalling every other
             // group in the same page.
-            Delivery.Undecryptable(gid, cursor, e.message ?: "could not open payload")
+            emit(Delivery.Undecryptable(gid, cursor, e.message ?: "could not open payload"))
         }
     }
 
@@ -1216,34 +1632,54 @@ class CordnGroupManager(
      *
      * Opening one is **not** liveness: it proves the sender was behind, not that we are current,
      * so it leaves the [GroupInbox.unopenable] count alone. A payload no key opens raises it.
+     *
+     * A sender a later epoch removed is refused: they still hold the epoch they were removed from,
+     * and would otherwise keep posting into the group until it is [MlsGroup.RETAIN_EPOCHS]
+     * Commits further on. cordn-web shows these; see the plan's divergence note.
      */
     private fun ingestFromFormerEpoch(
         gid: String,
-        group: MlsGroup,
+        slot: Slot,
         cursor: Long,
-        sealed: String,
-    ): Delivery {
+        payload: ByteArray,
+        emit: (Delivery) -> Unit,
+    ) {
+        val group = slot.group
+        val keys = keysOf(slot)
+        val formerKeys = keys.former ?: SealedPayload.formerApplicationKeys(group).also { keys.former = it }
         val former =
-            SealedPayload.formerApplicationKeys(group).firstNotNullOfOrNull { (epoch, key) ->
-                runCatching { SealedPayload.open(sealed, key) }.getOrNull()?.let { epoch to it }
+            formerKeys.firstNotNullOfOrNull { (epoch, key) ->
+                runCatching { SealedPayload.open(payload, key) }.getOrNull()?.let { epoch to it }
             }
         if (former == null) {
             sync.inbox(gid).noteUnopenable()
-            return Delivery.Undecryptable(gid, cursor, "no epoch key this device holds opens it")
+            return emit(Delivery.Undecryptable(gid, cursor, "no epoch key this device holds opens it"))
         }
 
         val (epoch, opened) = former
-        return try {
+        try {
             // Application messages only: a Commit from a former epoch is one
             // that lost to the Commit we applied, and MLS refuses it.
             val decrypted = group.decryptFormerEpoch(opened)
             val received = CordnApplicationMessage.open(decrypted)
-            val mediaKey = CordnMediaEncryption.mediaKeyAt(group, epoch)
-            queueForStore(gid, CordnDeliveredMessage(received.envelope, cursor, mediaKey))
-            Delivery.Message(gid, cursor, received, mediaKey)
+            val members = keys.members ?: CordnCredential.memberIdentities(group).also { keys.members = it }
+            val leaves = keys.leaves ?: group.members().mapTo(mutableSetOf()) { it.first }.also { keys.leaves = it }
+            if (received.sender !in members || received.senderLeafIndex !in leaves) {
+                return emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch by a sender no longer in the group"))
+            }
+            val mediaKey = keys.formerMedia.getOrPut(epoch) { CordnMediaEncryption.mediaKeyAt(group, epoch) }
+            slot.pendingMessages.addLast(CordnDeliveredMessage(received.envelope, cursor, mediaKey))
+            emit(Delivery.Message(gid, cursor, received, mediaKey))
         } catch (e: Exception) {
-            Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch: ${e.message ?: "could not open payload"}")
+            emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch: ${e.message ?: "could not open payload"}"))
         }
+    }
+
+    /** [slot]'s keys for the epoch it is on, derived once per epoch. */
+    private fun keysOf(slot: Slot): EpochKeys {
+        val group = slot.group
+        slot.keys?.takeIf { it.epoch == group.epoch }?.let { return it }
+        return EpochKeys(group.epoch, SealedPayload.applicationKey(group), CordnMediaEncryption.mediaKey(group)).also { slot.keys = it }
     }
 
     // ---- sharing and disclosure -----------------------------------------
@@ -1279,7 +1715,7 @@ class CordnGroupManager(
         requireGroup(gid)
         return GroupExposure(
             coordinator = config.pubKey,
-            linkedGroupCount = groups.size,
+            linkedGroupCount = groups.size(),
             // §8.1: a join request names the asker's real npub against a
             // specific group. Persisted at the moment it happens, because it
             // is a thing the coordinator now knows permanently.
@@ -1314,50 +1750,76 @@ class CordnGroupManager(
 
     // ---- plumbing --------------------------------------------------------
 
-    private fun requireGroup(gid: String) = groups[gid] ?: throw CordnGroupException("not a member of $gid")
+    private fun requireSlot(gid: String): Slot = groups[gid] ?: throw CordnGroupException("not a member of $gid")
 
+    private fun requireGroup(gid: String): MlsGroup = requireSlot(gid).group
+
+    private fun gidList(): List<String> = groups.snapshot().keys.toList()
+
+    /** Runs [block] holding [gid]'s lock. Not reentrant: nothing called under it takes it again. */
+    private suspend fun <T> withGroup(
+        gid: String,
+        block: suspend () -> T,
+    ): T = groupLocks.getOrPut(gid) { Mutex() }.withLock { block() }
+
+    /**
+     * Writes what changed of [gid] since the last write. Runs under [gid]'s lock.
+     *
+     * The order is the crash story:
+     *
+     * 1. **The echo record first.** It can only run ahead of the rest, which is the safe
+     *    direction: a Commit it calls confirmed while the saved group still holds it staged is
+     *    merged again when its echo is delivered again, and a lost one is still recognised.
+     *    Records it drops are only those the *saved* cursor has passed.
+     * 2. **The MLS state**, only when it changed: it is the largest write by far, and most saves
+     *    (a catch-up that found nothing, a send's record) do not touch it.
+     * 3. **Messages before the cursor.** Crash between the two and the message is on disk while
+     *    the cursor still points before it: the next catch-up re-delivers it and
+     *    appendMessage's dedup drops it, costing nothing. The other order loses the message
+     *    permanently — both cordn seal keys are epoch-derived, so the copy the coordinator still
+     *    holds can no longer be opened, and the cursor would not offer it again anyway.
+     * 4. **The cursor last**, never ahead of the state that read up to it.
+     */
     private suspend fun persist(gid: String) {
-        val group = groups[gid] ?: return
-        store.saveGroup(gid, group.saveState().encodeTls())
+        val slot = groups[gid] ?: return
+        val inbox = sync.inbox(gid)
 
-        // Messages BEFORE the cursor, and deliberately so. Crash between the
-        // two and the message is on disk while the cursor still points before
-        // it: the next catch-up re-delivers it and appendMessage's dedup drops
-        // it, costing nothing. The other order loses the message permanently —
-        // both cordn seal keys are epoch-derived, so the copy the coordinator
-        // still holds can no longer be opened, and the cursor would not offer
-        // it again anyway.
-        //
-        // Living here rather than at the call sites is the point: the ordering
-        // is the correctness property, so it sits next to the cursor write
-        // where it cannot be forgotten.
-        pendingMessages.remove(gid)?.forEach { store.appendMessage(gid, it) }
+        val echoes = inbox.echoes()
+        if (echoes != slot.savedEcho) {
+            store.saveEchoState(gid, echoes)
+            slot.savedEcho = echoes
+        }
 
-        sync.cursors()[gid]?.let { store.saveCursor(gid, it) }
-        // On the same beat as the cursor, because the two are only meaningful
-        // together: a cursor that outlives the process while the record of
-        // what is ours does not leaves the next run re-reading its own
-        // traffic with no way to recognise it. See EchoState.
-        sync.echoes()[gid]?.let { store.saveEchoState(gid, it) }
+        if (slot.dirty) {
+            store.saveGroup(gid, slot.group.saveState().encodeTls())
+            slot.dirty = false
+        }
+
+        while (slot.pendingMessages.isNotEmpty()) {
+            store.appendMessage(gid, slot.pendingMessages.first())
+            slot.pendingMessages.removeFirst()
+        }
+
+        val cursor = inbox.cursor
+        if (cursor != slot.savedCursor) {
+            store.saveCursor(gid, cursor)
+            slot.savedCursor = cursor
+        }
+        inbox.markPersisted(cursor)
     }
 
     /**
-     * Messages delivered but not yet written, per group.
-     *
-     * [ingest] is not a suspend function — it runs inside the sync's own
-     * delivery callback — so it cannot write. It queues here instead, and
-     * [persist] drains the queue immediately before the cursor. Held in memory
-     * only for as long as the cursor is: neither is on disk until a run ends,
-     * so a crash mid-run loses both together and the next catch-up refetches
-     * from the last cursor that *was* written.
+     * [persist] where a failure must not fail the caller: what did not save stays marked and the
+     * next save writes it. Logged, because a store that keeps failing is a device losing progress.
      */
-    private val pendingMessages = mutableMapOf<String, MutableList<CordnDeliveredMessage>>()
-
-    private fun queueForStore(
-        gid: String,
-        message: CordnDeliveredMessage,
-    ) {
-        pendingMessages.getOrPut(gid) { mutableListOf() }.add(message)
+    private suspend fun persistQuietly(gid: String) {
+        try {
+            persist(gid)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "could not save $gid; the next save retries", e)
+        }
     }
 
     /** Every message this group has stored, oldest first. */
@@ -1366,8 +1828,9 @@ class CordnGroupManager(
     /** The newest stored message and the count, without reading the log. */
     suspend fun storedMessageSummary(gid: String): CordnMessageSummary? = store.loadMessageSummary(gid)
 
+    /** Saves every group, each under its own lock; one that fails does not stop the others. */
     private suspend fun persistAll() {
-        groups.keys.forEach { persist(it) }
+        gidList().forEach { gid -> withGroup(gid) { persistQuietly(gid) } }
     }
 
     /** Runs a coordinator call, recording the outcome against [health]. */
@@ -1380,6 +1843,8 @@ class CordnGroupManager(
         }
 
     companion object {
+        private const val TAG = "CordnGroupManager"
+
         /** `spec/02.md` §6: a cordn chat message is a NIP-C7 kind 9. */
         const val CHAT_KIND = 9
 
@@ -1467,9 +1932,9 @@ class CordnGroupException(
         NOT_A_MEMBER,
 
         /**
-         * This device could not open recent traffic, so it may have missed a change, and a
-         * change made from here could split the group. Nothing was changed. It clears once a
-         * message sealed for the group's current epoch arrives.
+         * This device could not open recent traffic, or a Commit at its epoch would not apply, so
+         * it may have missed a change, and a change made from here could split the group. Nothing
+         * was changed. It clears once a payload sealed for the group's current epoch is read.
          */
         BEHIND,
 
@@ -1572,8 +2037,8 @@ data class MetadataUpdateResult(
  *
  * Three outcomes rather than success-or-throw, because each needs a different
  * answer: [refused] never reached the group and can be retried or replaced with
- * a share link; [undelivered] are in the group already and need only the Welcome
- * resent; [invited] are done.
+ * a share link; [undelivered] are in the group already and need only the Welcome,
+ * which the manager keeps and stores on a later sync; [invited] are done.
  */
 data class BatchInviteResult(
     val gid: String,

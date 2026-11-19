@@ -249,55 +249,101 @@ object CordnRoomStateCodec {
  * The on-disk layout of an [EchoState].
  *
  * ```
- * version:u16
- * pending_commits: vector2 of { sealed:opaque2, applied:u8 }
- * own_cursors: vector2 of u64
- * -- trailing, absent from what older versions wrote --
+ * version:u16 = 1
+ * pending_commits: opaque2 of { sealed:opaque2, applied:u8 }   -- what 1.3.0 reads
+ * own_cursors: opaque2 of u64                                   -- what 1.3.0 reads
+ * -- trailing: absent from what 1.3.0 wrote, never read by it, and omitted when empty --
  * unopenable: u32
- * deferred_welcomes: vector4 of { sealed:opaque2, welcomes: vector4 of { target:opaque2, kp_ref:opaque2, welcome:opaque4 } }
+ * operations: opaque4 of {
+ *   sealed: opaque4, applied: u8, status: u8 (0 pending, 1 lost, 2 confirmed),
+ *   from_epoch: optional<u64>, landed_at: optional<u64>,   -- optional<T>: u8 present, then T
+ *   welcome_blobs: opaque4 of opaque4,                     -- each distinct Welcome once
+ *   welcomes: opaque4 of { target:opaque2, kp_ref:opaque2, blob:u32 },
+ * }
+ * more_own_cursors: opaque4 of u64                          -- those `own_cursors` had no room for
  * ```
  *
  * The trailing section is how the format grows without a version bump: an older reader stops
  * after `own_cursors` and never sees it, and a newer reader treats its absence as zero and none.
- * A version bump would instead make every older reader see an empty record.
+ * A version bump would instead make every older reader see an empty record. When present,
+ * `operations` is the whole list; `pending_commits` repeats the outstanding ones that fit, for the
+ * older reader only.
+ *
+ * Every field that can grow is an opaque4, so the record never refuses to encode: a Commit
+ * adding many members is larger than an opaque2 holds, and a save that threw would leave every
+ * later save of the group throwing too. A Commit too large for `pending_commits` is simply not in
+ * it; the older reader, which could not have written it, does not see it.
  *
  * Empty on anything unreadable, which is the safe direction: losing the record
  * costs a client one run of reporting its own traffic as a gap, while
  * accepting a half-decoded one could let it skip somebody else's message as
- * though it were its own.
+ * though it were its own. An unreadable trailing section costs only itself.
  */
 object EchoStateCodec {
     const val VERSION = 1
+
+    private const val OPAQUE2_MAX = 0xFFFF
 
     fun encode(state: EchoState): ByteArray {
         val writer = TlsWriter()
         writer.putUint16(VERSION)
 
+        // What 1.3.0 reads: the outstanding Commits, as far as an opaque2 holds them.
         val commits = TlsWriter()
+        var commitBytes = 0
+        var everyOpInV1 = true
         state.pendingCommits.forEach {
-            commits.putOpaque2(it.sealedBase64.encodeToByteArray())
-            commits.putUint8(if (it.localStateApplied) 1 else 0)
+            val sealed = it.sealedBase64.encodeToByteArray()
+            val entry = 2 + sealed.size + 1
+            val plain = it.isOutstanding && it.welcomes.isEmpty() && it.fromEpoch == null && it.landedAt == null
+            if (!plain) everyOpInV1 = false
+            if (it.isOutstanding && sealed.size <= OPAQUE2_MAX && commitBytes + entry <= OPAQUE2_MAX) {
+                commits.putOpaque2(sealed)
+                commits.putUint8(if (it.localStateApplied) 1 else 0)
+                commitBytes += entry
+            } else {
+                everyOpInV1 = false
+            }
         }
         writer.putOpaque2(commits.toByteArray())
 
+        val fit = state.ownMessageCursors.size.coerceAtMost(OPAQUE2_MAX / 8)
         val cursors = TlsWriter()
-        state.ownMessageCursors.forEach { cursors.putUint64(it) }
+        state.ownMessageCursors.take(fit).forEach { cursors.putUint64(it) }
         writer.putOpaque2(cursors.toByteArray())
+        val moreCursors = state.ownMessageCursors.drop(fit)
+
+        // Nothing 1.3.0 could not have written: write exactly what it wrote.
+        if (state.unopenable == 0 && everyOpInV1 && moreCursors.isEmpty()) return writer.toByteArray()
 
         writer.putUint32(state.unopenable.toLong())
 
-        val deferred = TlsWriter()
-        state.pendingCommits.filter { it.welcomes.isNotEmpty() }.forEach { commit ->
-            deferred.putOpaque2(commit.sealedBase64.encodeToByteArray())
-            val welcomes = TlsWriter()
-            commit.welcomes.forEach {
-                welcomes.putOpaque2(it.targetPubKey.encodeToByteArray())
-                welcomes.putOpaque2(it.keyPackageRef.encodeToByteArray())
-                welcomes.putOpaque4(it.welcomeBase64.encodeToByteArray())
+        val operations = TlsWriter()
+        state.pendingCommits.forEach { op ->
+            operations.putOpaque4(op.sealedBase64.encodeToByteArray())
+            operations.putUint8(if (op.localStateApplied) 1 else 0)
+            operations.putUint8(op.status.ordinal)
+            putOptional(operations, op.fromEpoch)
+            putOptional(operations, op.landedAt)
+
+            val blobs = op.welcomes.map { it.welcomeBase64 }.distinct()
+            val blobWriter = TlsWriter()
+            blobs.forEach { blobWriter.putOpaque4(it.encodeToByteArray()) }
+            operations.putOpaque4(blobWriter.toByteArray())
+
+            val targets = TlsWriter()
+            op.welcomes.forEach {
+                targets.putOpaque2(it.targetPubKey.encodeToByteArray())
+                targets.putOpaque2(it.keyPackageRef.encodeToByteArray())
+                targets.putUint32(blobs.indexOf(it.welcomeBase64).toLong())
             }
-            deferred.putOpaque4(welcomes.toByteArray())
+            operations.putOpaque4(targets.toByteArray())
         }
-        writer.putOpaque4(deferred.toByteArray())
+        writer.putOpaque4(operations.toByteArray())
+
+        val more = TlsWriter()
+        moreCursors.forEach { more.putUint64(it) }
+        writer.putOpaque4(more.toByteArray())
 
         return writer.toByteArray()
     }
@@ -321,36 +367,71 @@ object EchoStateCodec {
                     own += cursors.readUint64()
                 }
 
-                var unopenable = 0
-                val welcomesBySealed = mutableMapOf<String, List<DeferredWelcome>>()
-                if (reader.hasRemaining) {
-                    unopenable = reader.readUint32().toInt()
-                    val deferred = TlsReader(reader.readOpaque4())
-                    while (deferred.hasRemaining) {
-                        val sealed = deferred.readOpaque2().decodeToString()
-                        val welcomes = TlsReader(deferred.readOpaque4())
-                        val list = mutableListOf<DeferredWelcome>()
-                        while (welcomes.hasRemaining) {
-                            list +=
-                                DeferredWelcome(
-                                    targetPubKey = welcomes.readOpaque2().decodeToString(),
-                                    keyPackageRef = welcomes.readOpaque2().decodeToString(),
-                                    welcomeBase64 = welcomes.readOpaque4().decodeToString(),
-                                )
-                        }
-                        welcomesBySealed[sealed] = list
-                    }
-                }
-
+                val trailing = if (reader.hasRemaining) decodeTrailing(reader) else null
                 EchoState(
-                    pendingCommits = pending.map { it.copy(welcomes = welcomesBySealed[it.sealedBase64].orEmpty()) },
-                    ownMessageCursors = own,
-                    unopenable = unopenable,
+                    pendingCommits = trailing?.operations ?: pending,
+                    ownMessageCursors = own + trailing?.moreCursors.orEmpty(),
+                    unopenable = trailing?.unopenable ?: 0,
                 )
             }
         } catch (e: Exception) {
             EchoState()
         }
+
+    private class Trailing(
+        val unopenable: Int,
+        val operations: List<PendingEpochOperation>,
+        val moreCursors: List<Long>,
+    )
+
+    /** Null when the section does not read, which keeps the part an older version also wrote. */
+    private fun decodeTrailing(reader: TlsReader): Trailing? =
+        try {
+            val unopenable = reader.readUint32().toInt()
+            val operations = TlsReader(reader.readOpaque4())
+            val ops = mutableListOf<PendingEpochOperation>()
+            while (operations.hasRemaining) {
+                val sealed = operations.readOpaque4().decodeToString()
+                val applied = operations.readUint8() == 1
+                val status = PendingEpochOperation.Status.entries.getOrNull(operations.readUint8())
+                val fromEpoch = readOptional(operations)
+                val landedAt = readOptional(operations)
+                val blobReader = TlsReader(operations.readOpaque4())
+                val blobs = mutableListOf<String>()
+                while (blobReader.hasRemaining) blobs += blobReader.readOpaque4().decodeToString()
+                val targets = TlsReader(operations.readOpaque4())
+                val welcomes = mutableListOf<DeferredWelcome>()
+                while (targets.hasRemaining) {
+                    val target = targets.readOpaque2().decodeToString()
+                    val ref = targets.readOpaque2().decodeToString()
+                    welcomes += DeferredWelcome(target, ref, blobs[targets.readUint32().toInt()])
+                }
+                // A status a newer version invented is one this version cannot act on.
+                if (status != null) ops += PendingEpochOperation(sealed, applied, welcomes, status, fromEpoch, landedAt)
+            }
+            val more = mutableListOf<Long>()
+            if (reader.hasRemaining) {
+                val moreReader = TlsReader(reader.readOpaque4())
+                while (moreReader.hasRemaining) more += moreReader.readUint64()
+            }
+            Trailing(unopenable, ops, more)
+        } catch (e: Exception) {
+            null
+        }
+
+    private fun putOptional(
+        writer: TlsWriter,
+        value: Long?,
+    ) {
+        if (value == null) {
+            writer.putUint8(0)
+        } else {
+            writer.putUint8(1)
+            writer.putUint64(value)
+        }
+    }
+
+    private fun readOptional(reader: TlsReader): Long? = if (reader.readUint8() == 1) reader.readUint64() else null
 }
 
 /** A [CordnGroupStore] that keeps everything in memory. Tests, and nothing else. */

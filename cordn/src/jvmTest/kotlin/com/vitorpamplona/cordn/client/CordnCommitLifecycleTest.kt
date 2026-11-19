@@ -24,7 +24,10 @@ import com.vitorpamplona.cordn.appEncryptedMedia.CordnMediaEncryption
 import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.cordn.spec01GroupMetadata.CordnGroupMetadata
+import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec03Payloads.SealedPayload
+import com.vitorpamplona.cordn.sync.EchoState
+import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
 import com.vitorpamplona.quartz.nip01Core.core.Event
@@ -33,6 +36,7 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -217,7 +221,8 @@ class CordnCommitLifecycleTest {
             assertEquals("bob's", g.alice.name())
             assertFalse(carol in CordnCredential.membersOf(g.alice.group(gid)!!).values)
             assertTrue(g.coordinator.welcomes[carol].isNullOrEmpty(), "no Welcome into a branch nobody is on")
-            assertTrue(lost.any { it is CordnGroupManager.Delivery.CommitLost })
+            // One "change lost" per Commit: the waiting call's exception, not a delivery as well.
+            assertTrue(lost.none { it is CordnGroupManager.Delivery.CommitLost }, "reported twice: $lost")
 
             // Bob is unharmed: Alice's losing Commit is not a Commit he applies,
             // and it is not evidence that he is behind.
@@ -327,5 +332,294 @@ class CordnCommitLifecycleTest {
             val keys = SealedPayload.formerApplicationKeys(g.alice.group(gid)!!)
             assertEquals(MlsGroup.RETAIN_EPOCHS, keys.size)
             assertEquals(keys.map { it.first }.sortedDescending(), keys.map { it.first }, "newest first")
+        }
+
+    // ---- audit fixes (2026-11-19) ------------------------------------------
+
+    /**
+     * Writes through to [inner], the echo record through its on-disk codec, until armed; then
+     * "dies" at the next cursor write and refuses every write after it.
+     */
+    private class DyingStore(
+        val inner: InMemoryCordnGroupStore = InMemoryCordnGroupStore(),
+    ) : CordnGroupStore by inner {
+        var dieAtNextCursor = false
+        var dead = false
+        var failNextAppend = false
+
+        private fun check() {
+            if (dead) throw IllegalStateException("the process is gone")
+        }
+
+        override suspend fun saveCursor(
+            gid: String,
+            cursor: GroupCursor,
+        ) {
+            check()
+            if (dieAtNextCursor) {
+                dead = true
+                throw IllegalStateException("killed between the group and the cursor")
+            }
+            inner.saveCursor(gid, cursor)
+        }
+
+        override suspend fun saveGroup(
+            gid: String,
+            state: ByteArray,
+        ) {
+            check()
+            inner.saveGroup(gid, state)
+        }
+
+        override suspend fun saveEchoState(
+            gid: String,
+            state: EchoState,
+        ) {
+            check()
+            // Through the on-disk codec, as a real store does: the in-memory one never encodes.
+            inner.saveEchoState(gid, EchoStateCodec.decode(EchoStateCodec.encode(state)))
+        }
+
+        override suspend fun appendMessage(
+            gid: String,
+            message: CordnDeliveredMessage,
+        ) {
+            check()
+            if (failNextAppend) {
+                failNextAppend = false
+                throw IllegalStateException("disk full")
+            }
+            inner.appendMessage(gid, message)
+        }
+    }
+
+    @Test
+    fun `two commits at once on one manager both land, one after the other`() =
+        runTest {
+            val g = aliceAndBob()
+            // Each post takes a while, so the second call starts while the first is in flight.
+            g.coordinator.postDelayMs = 50
+            val first = async { g.alice.updateGroupMetadata(gid) { it.copy(name = "first") } }
+            val second = async { g.alice.updateGroupMetadata(gid) { it.copy(description = "second") } }
+            first.await()
+            second.await()
+
+            assertEquals(3L, g.alice.group(gid)!!.epoch, "both commits applied, in turn")
+            assertEquals("first", g.alice.name())
+            assertEquals("second", CordnGroupMetadata.fromExtensions(g.alice.group(gid)!!.extensions)?.description)
+            g.bob.catchUp { }
+            assertEquals(3L, g.bob.group(gid)!!.epoch, "Bob follows both: nobody forked")
+            assertEquals("first", g.bob.name())
+            assertFalse(g.bob.mayBeBehind(gid))
+        }
+
+    @Test
+    fun `a commit whose echo is past the catch-up page budget is confirmed, not dropped`() =
+        runTest {
+            val g = aliceAndBob()
+            g.coordinator.pageSize = 1
+            // 70 messages of Bob's are sequenced between Alice's catch-up and her Commit, and the
+            // answer to her post is lost.
+            g.coordinator.beforeNextPost = { repeat(70) { g.bob.send(gid, "m$it") } }
+            g.coordinator.storeThenFailNextPost = true
+            val error = assertFailsWith<CordnGroupException> { g.alice.updateGroupMetadata(gid) { it.copy(name = "first") } }
+            assertEquals(CordnGroupException.Reason.COMMIT_UNCONFIRMED, error.reason)
+
+            // More than 64 one-message pages lie between Alice and her echo: reading "to the end"
+            // must mean an empty page, or the first Commit is dropped while it is on the stream.
+            val lost = mutableListOf<CordnGroupManager.Delivery>()
+            g.alice.deliveryListener = { lost += it }
+            g.alice.updateGroupMetadata(gid) { it.copy(description = "second") }
+
+            assertTrue(lost.none { it is CordnGroupManager.Delivery.CommitLost }, "the first Commit was on the stream: $lost")
+            assertEquals(3L, g.alice.group(gid)!!.epoch)
+            assertEquals("first", g.alice.name())
+            g.bob.catchUp { }
+            assertEquals(3L, g.bob.group(gid)!!.epoch)
+            assertEquals("first", g.bob.name())
+        }
+
+    @Test
+    fun `a commit dropped as never landed is merged when its echo lands late`() =
+        runTest {
+            val g = aliceAndBob()
+            // The post times out while the request is still on its way.
+            g.coordinator.holdNextPost = true
+            val error = assertFailsWith<CordnGroupException> { g.alice.updateGroupMetadata(gid) { it.copy(name = "first") } }
+            assertEquals(CordnGroupException.Reason.COMMIT_UNCONFIRMED, error.reason)
+
+            // The retry reads to the end without it and drops it; then the coordinator
+            // sequences the late one just before the retry's own Commit.
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            g.alice.deliveryListener = { delivered += it }
+            g.coordinator.beforeNextPost = { g.coordinator.releaseHeld() }
+            val retry = assertFailsWith<CordnGroupException> { g.alice.updateGroupMetadata(gid) { it.copy(name = "second") } }
+            assertEquals(CordnGroupException.Reason.COMMIT_LOST, retry.reason, "the late Commit took the epoch")
+
+            // Alice follows what everyone else applied: the late Commit, not the retry.
+            assertEquals(2L, g.alice.group(gid)!!.epoch)
+            assertEquals("first", g.alice.name())
+            assertEquals(1, delivered.count { it is CordnGroupManager.Delivery.CommitLost }, "the drop is reported once: $delivered")
+            g.bob.catchUp { }
+            assertEquals(2L, g.bob.group(gid)!!.epoch)
+            assertEquals("first", g.bob.name())
+
+            // And the group keeps working: the next change lands for both.
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "third") }
+            g.bob.catchUp { }
+            assertEquals("third", g.bob.name())
+            assertFalse(g.alice.mayBeBehind(gid))
+        }
+
+    @Test
+    fun `a late echo after a restart is recognised as ours and reported nowhere twice`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val store = InMemoryCordnGroupStore()
+            val first = manager(alice, coordinator, store)
+            first.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+            coordinator.holdNextPost = true
+            assertFailsWith<CordnGroupException> { first.updateGroupMetadata(gid) { it.copy(name = "first") } }
+            // Dropped by the next commit, which lands.
+            first.updateGroupMetadata(gid) { it.copy(name = "second") }
+
+            val restarted = manager(alice, coordinator, store)
+            restarted.restore()
+            coordinator.releaseHeld()
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            restarted.catchUp { delivered += it }
+
+            assertEquals(listOf("Echo"), delivered.map { it::class.simpleName }, "ours, already reported")
+            assertFalse(restarted.mayBeBehind(gid))
+            assertEquals("second", CordnGroupMetadata.fromExtensions(restarted.group(gid)!!.extensions)?.name)
+        }
+
+    @Test
+    fun `a commit at our epoch that will not apply raises the behind gate`() =
+        runTest {
+            val g = aliceAndBob()
+            // Bob's Commit, sealed for epoch 1 under the right key, but corrupted inside.
+            val scratch = MlsGroup.restore(g.bob.group(gid)!!.saveState(), CordnGroupPolicy)
+            scratch.proposeGroupContextExtensions(scratch.extensions)
+            val result = scratch.stageCommit()
+            val framed = result.framedCommitBytes.copyOf().also { it[it.size - 1] = (it[it.size - 1].toInt() xor 1).toByte() }
+            g.coordinator.inject(gid, SealedPayload.seal(framed, result.preCommitExporterSecret))
+
+            g.alice.catchUp { }
+            assertTrue(g.alice.mayBeBehind(gid), "a Commit at our epoch that MLS refused is evidence of a missed change")
+            val error = assertFailsWith<CordnGroupException> { g.alice.updateGroupMetadata(gid) { it.copy(name = "nope") } }
+            assertEquals(CordnGroupException.Reason.BEHIND, error.reason)
+            assertEquals(1L, g.alice.group(gid)!!.epoch)
+
+            // A message read successfully at our epoch is the proof that clears it.
+            g.bob.send(gid, "readable")
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "fine") }
+            assertEquals("fine", g.alice.name())
+        }
+
+    @Test
+    fun `a Welcome owed by a confirmed commit survives a restart until it is stored`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val store = InMemoryCordnGroupStore()
+            val (bobBundle, bobStored) = publication(bobSigner, "bb".repeat(16))
+            coordinator.seedKeyPackage(bobStored)
+
+            val first = manager(alice, coordinator, store)
+            first.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+            coordinator.storeThenFailNextPost = true
+            assertFailsWith<CordnGroupException> { first.invite(gid, bob) }
+
+            // A sync confirms the Commit; storing its Welcome fails; the process dies.
+            coordinator.failNextWelcomeStore = true
+            first.catchUp { }
+            assertEquals(1L, first.group(gid)!!.epoch)
+            assertTrue(coordinator.welcomes[bob].isNullOrEmpty())
+
+            val restarted = manager(alice, coordinator, store)
+            restarted.restore()
+            restarted.catchUp { }
+            assertEquals(1, coordinator.welcomes[bob]?.size, "the owed Welcome was kept on disk and goes out")
+            // And only once, however many syncs and commits follow.
+            restarted.catchUp { }
+            restarted.updateGroupMetadata(gid) { it.copy(name = "after") }
+            assertEquals(1, coordinator.welcomes[bob]?.size)
+
+            val bobManager = manager(bob, coordinator.viewAs(bob))
+            assertEquals(listOf(gid), bobManager.joinPendingWelcomes({ bobBundle }).joined)
+        }
+
+    @Test
+    fun `a confirmed commit delivered again after a crash between saves is not reported lost`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val store = DyingStore()
+            val first = manager(alice, coordinator, store)
+            first.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+
+            store.dieAtNextCursor = true
+            first.updateGroupMetadata(gid) { it.copy(name = "renamed") }
+            assertTrue(store.dead, "the process died after the group was saved and before the cursor")
+
+            val restarted = manager(alice, coordinator, store.inner)
+            restarted.restore()
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            restarted.catchUp { delivered += it }
+
+            assertTrue(delivered.none { it is CordnGroupManager.Delivery.CommitLost }, "a change that happened, reported lost: $delivered")
+            assertEquals(1L, restarted.group(gid)!!.epoch)
+            assertEquals("renamed", CordnGroupMetadata.fromExtensions(restarted.group(gid)!!.extensions)?.name)
+        }
+
+    @Test
+    fun `send does not throw once the post went out, even when saving fails`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val store = DyingStore()
+            val m = manager(alice, coordinator, store)
+            m.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+
+            store.failNextAppend = true
+            val sent = m.send(gid, "out")
+            assertEquals(1, coordinator.posted(gid).size)
+            assertTrue(m.storedMessages(gid).isEmpty())
+
+            // The next save writes what the failed one did not.
+            m.catchUp { }
+            assertEquals(listOf(sent), m.storedMessages(gid))
+        }
+
+    @Test
+    fun `an invite too large for the old echo record still goes out`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val store = DyingStore()
+            val m = manager(alice, coordinator, store)
+            m.createGroup(gid, CordnGroupMetadata(name = "big"))
+            val signers = List(200) { NostrSignerSync(KeyPair()) }
+            signers.forEachIndexed { i, signer -> coordinator.seedKeyPackage(publication(signer, i.toString(16).padStart(32, '0')).second) }
+
+            val result = m.inviteAll(gid, signers.map { it.pubKey })
+            assertEquals(200, result.invited.size, "refused: ${result.refused}, undelivered: ${result.undelivered}")
+            val size = coordinator.posted(gid).single().length
+            assertTrue(size > 65_535, "the Commit ($size bytes) is larger than an opaque2")
+            assertEquals(1L, m.group(gid)!!.epoch)
+            assertEquals(200, coordinator.welcomes.size, "every Welcome went out")
+        }
+
+    @Test
+    fun `a former-epoch message from a member removed since is refused`() =
+        runTest {
+            val g = aliceAndBob()
+            // Bob is removed; still holding epoch 1, he keeps posting there.
+            g.alice.removeMember(gid, bob)
+            assertEquals(2L, g.alice.group(gid)!!.epoch)
+            g.bob.send(gid, "still here")
+
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            g.alice.catchUp { delivered += it }
+            assertTrue(delivered.none { it is CordnGroupManager.Delivery.Message }, "a removed member's message was shown: $delivered")
+            assertTrue(g.alice.storedMessages(gid).isEmpty())
+            assertFalse(g.alice.mayBeBehind(gid), "not evidence of a missed change either")
         }
 }

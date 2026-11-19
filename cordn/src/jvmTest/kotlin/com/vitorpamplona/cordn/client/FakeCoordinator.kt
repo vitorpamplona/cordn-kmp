@@ -32,6 +32,7 @@ import com.vitorpamplona.cordn.spec00Coordinator.PublishedKeyPackage
 import com.vitorpamplona.cordn.spec00Coordinator.TakenKeyPackage
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import kotlinx.coroutines.delay
 
 /**
  * A coordinator that behaves, in memory.
@@ -119,6 +120,30 @@ class FakeCoordinator(
      */
     var beforeNextPost: (suspend () -> Unit)? = null
 
+    /**
+     * Fails the next `msg_post` and keeps it, unsequenced, until [releaseHeld]: a request still
+     * travelling over the relays when the client gave up on it, which the coordinator sequences
+     * later.
+     */
+    var holdNextPost = false
+
+    private val held = mutableListOf<Pair<String, String>>()
+
+    /** Sequences every post [holdNextPost] kept, as the coordinator finally receiving them. */
+    fun releaseHeld() {
+        held.forEach { (gid, sealed) -> inject(gid, sealed) }
+        held.clear()
+    }
+
+    /** Fails the next `welcome_store`. */
+    var failNextWelcomeStore = false
+
+    /** Virtual milliseconds every `msg_post` takes, so concurrent callers interleave. */
+    var postDelayMs = 0L
+
+    /** How many messages one `msg_fetch_many` returns at most, as a real coordinator pages. */
+    var pageSize = Int.MAX_VALUE
+
     /** Appends [sealedBase64] to [gid]'s stream as if somebody posted it. */
     fun inject(
         gid: String,
@@ -188,6 +213,10 @@ class FakeCoordinator(
         after: Long?,
     ): Long {
         record("welcome_store")
+        if (failNextWelcomeStore) {
+            failNextWelcomeStore = false
+            throw IllegalStateException("welcome_store failed")
+        }
         val at = clock++
         welcomes.getOrPut(targetPubKey) { mutableListOf() } += PendingWelcome(keyPackageRef, welcomeBase64, at, after)
         return at
@@ -228,6 +257,12 @@ class FakeCoordinator(
         sealedBase64: String,
     ): PostedMessage {
         record("msg_post")
+        if (postDelayMs > 0) delay(postDelayMs)
+        if (holdNextPost) {
+            holdNextPost = false
+            held += gid to sealedBase64
+            throw IllegalStateException("msg_post timed out")
+        }
         beforeNextPost?.let {
             beforeNextPost = null
             it()
@@ -252,6 +287,7 @@ class FakeCoordinator(
         return cursors.entries
             .flatMap { (gid, after) -> streams[gid].orEmpty().filter { it.cursor > (after ?: 0L) } }
             .sortedBy { it.cursor }
+            .take(pageSize)
     }
 
     override suspend fun subscribeMessages(

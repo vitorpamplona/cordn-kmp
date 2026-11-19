@@ -24,6 +24,7 @@ import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -60,6 +61,9 @@ object CordnDeliveredMessageCodec {
 
     /** The carrying epoch's media key, hex. Optional: older entries do not have it, and older readers ignore it. */
     private const val MEDIA_KEY = "mk"
+
+    /** `encrypted-media.md` §3.1: the media key is a 32-byte ChaCha20-Poly1305 key. */
+    private const val MEDIA_KEY_SIZE = 32
 
     fun encode(message: CordnDeliveredMessage): String =
         Json.encodeToString(
@@ -98,8 +102,15 @@ object CordnDeliveredMessageCodec {
                 ?: throw IllegalArgumentException("a stored cordn message is missing `$ENVELOPE`")
 
         // A key that does not read is dropped rather than failing the entry: the
-        // message is still worth showing, and only its attachments fall back.
-        val mediaKey = json[MEDIA_KEY]?.jsonPrimitive?.content?.let { runCatching { it.hexToByteArray() }.getOrNull() }
+        // message is still worth showing, and only its attachments fall back. That
+        // includes a value that is not a string at all, and one that is not a
+        // 32-byte key: a wrong-length key only fails later, at every attachment.
+        val mediaKey =
+            (json[MEDIA_KEY] as? JsonPrimitive)
+                ?.takeIf { it.isString }
+                ?.content
+                ?.let { runCatching { it.hexToByteArray() }.getOrNull() }
+                ?.takeIf { it.size == MEDIA_KEY_SIZE }
 
         return CordnDeliveredMessage(CordnEnvelope.fromJsonObject(envelope), cursor, mediaKey)
     }

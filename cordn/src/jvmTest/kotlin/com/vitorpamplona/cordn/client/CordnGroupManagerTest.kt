@@ -29,6 +29,7 @@ import com.vitorpamplona.cordn.spec02Envelopes.CordnAnnotationIndex
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
 import com.vitorpamplona.cordn.spec02Envelopes.CordnMessageReferences
+import com.vitorpamplona.cordn.spec02Envelopes.ReceivedMessage
 import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
@@ -503,14 +504,18 @@ class CordnGroupManagerTest {
             val store = OrderRecordingStore()
             val m = manager(alice, coordinator, store)
             m.createGroup(gid, CordnGroupMetadata(name = "Order"))
+            assertTrue("saveCursor" in store.calls, "the cursor was never stored at all: ${store.calls}")
+            val before = store.calls.size
             m.send(gid, "one")
 
-            val append = store.calls.indexOf("appendMessage")
-            val cursor = store.calls.indexOf("saveCursor")
+            // A save writes only what changed, and a post does not move the cursor: what matters
+            // is that no cursor write since the send comes before the message's.
+            val sinceSend = store.calls.drop(before)
+            val append = sinceSend.indexOf("appendMessage")
+            val cursor = sinceSend.indexOf("saveCursor")
             assertTrue(append >= 0, "the message was never stored at all: ${store.calls}")
-            assertTrue(cursor >= 0, "the cursor was never stored at all: ${store.calls}")
             assertTrue(
-                append < cursor,
+                cursor == -1 || append < cursor,
                 "the cursor was written before the message, so a crash between them loses it: ${store.calls}",
             )
         }
@@ -1101,5 +1106,16 @@ class CordnGroupManagerTest {
         bobCoordinator.welcomes.putAll(alices.welcomes)
         bobCoordinator.streams.putAll(alices.streams)
         return bobCoordinator
+    }
+
+    @Test
+    fun `a delivered message compares by its media key's bytes`() {
+        val received = ReceivedMessage(alice, 0, 1, CordnEnvelope.build(alice, 1_757_000_000L, 9, emptyArray(), "x"))
+        val one = CordnGroupManager.Delivery.Message(gid, 1, received, ByteArray(32) { 1 })
+        val same = CordnGroupManager.Delivery.Message(gid, 1, received, ByteArray(32) { 1 })
+        assertEquals(one, same)
+        assertEquals(one.hashCode(), same.hashCode())
+        assertNotEquals(one, CordnGroupManager.Delivery.Message(gid, 1, received, ByteArray(32) { 2 }))
+        assertNotEquals(one, CordnGroupManager.Delivery.Message(gid, 1, received, null))
     }
 }
