@@ -7,7 +7,8 @@ on:
 
 jobs:
   # A release must depend only on published artifacts: its POM names the Quartz and mls-kmp
-  # versions it was built against, so those have to be on Maven Central before this one can be.
+  # versions it was built against, so those have to be released (both on Nostr + Blossom; a
+  # GitHub tag marks the release) before this one can be.
   check-dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -18,7 +19,7 @@ jobs:
         run: |
           args=$(tools/ci/quartz-args.sh 2>/dev/null || echo missing)
           if [ -n "$args" ]; then
-            echo "::error::The Quartz version in gradle/libs.versions.toml is not on Maven Central. Release Quartz first."
+            echo "::error::The Quartz version in gradle/libs.versions.toml is not released. Release Quartz first."
             exit 1
           fi
 
@@ -26,7 +27,7 @@ jobs:
         run: |
           args=$(tools/ci/mls-kmp-args.sh 2>/dev/null || echo missing)
           if [ -n "$args" ]; then
-            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not on Maven Central. Release mls-kmp first."
+            echo "::error::The mls-kmp version in gradle/libs.versions.toml is not released. Release mls-kmp first."
             exit 1
           fi
 
@@ -62,8 +63,17 @@ jobs:
             :cordn:iosSimulatorArm64Test \
             :cordn:compileTestKotlinIosArm64
 
-  # Apple klibs cross-compile on Linux; only Apple test binaries need a Mac.
-  deploy:
+  # Releases go to Nostr + Blossom only, through Magpie's publishToNostr (the plugin version is in
+  # settings.gradle.kts, the relays in gradle.properties); Maven Central has no release since the
+  # one that moved to Quartz 2.19.0, which isn't on Central either. The job runs the checks,
+  # uploads every file to the release key's Blossom servers (kind 10063) and signs one release
+  # event (kind 3071) per published module, sent to the key's own relays (its kind 10002 and
+  # nostr.json). The key never reaches CI: MAGPIE_BUNKER is a NIP-46 bunker URI, so the signer
+  # approves each release (the job waits for it), and vitorpamplona.com/.well-known/nostr.json
+  # must name the key as "releases" or Magpie refuses to sign. A version already on Nostr fails
+  # the job: releases are immutable. Apple klibs cross-compile on Linux; only Apple test binaries
+  # need a Mac.
+  nostr:
     needs: test-apple
     runs-on: ubuntu-latest
     permissions:
@@ -98,21 +108,17 @@ jobs:
       - name: Check
         run: ./gradlew :cordn:jvmTest :cordn:linuxX64Test
 
-      - name: Build (gradle)
-        run: ./gradlew :cordn:assemble
-
       # Tag v1.2.3 publishes version 1.2.3.
       - name: Set version for tag
         run: |
           echo "ORG_GRADLE_PROJECT_VERSION_NAME=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
-      - name: Publish
-        run: ./gradlew :cordn:publishAllPublicationsToMavenCentral --no-configuration-cache
+      - name: Publish to Nostr
+        run: ./gradlew :cordn:publishToNostr --no-configuration-cache
         env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.SONATYPE_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.SONATYPE_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_PRIVATE_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+          MAGPIE_BUNKER: ${{ secrets.MAGPIE_BUNKER }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
