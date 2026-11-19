@@ -213,4 +213,10 @@ class CordnGroupMetadataTest {
         // §6: omitting it entirely is valid, so this must not throw.
         assertNull(CordnGroupMetadata.fromExtensions(emptyList()))
     }
+
+    @Test
+    fun printsItsTrailingFieldsAsHexNotAsAReference() {
+        val printed = CordnGroupMetadata(name = "n", trailingFields = byteArrayOf(0x0a, 0x0b)).toString()
+        assertTrue("trailingFields=0a0b" in printed, printed)
+    }
 }

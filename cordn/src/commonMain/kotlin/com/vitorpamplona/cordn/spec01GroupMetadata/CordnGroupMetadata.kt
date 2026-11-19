@@ -114,6 +114,11 @@ data class CordnGroupMetadata(
         return 31 * result + trailingFields.contentHashCode()
     }
 
+    // A data class prints a ByteArray as its reference, which says nothing in a log.
+    override fun toString(): String =
+        "CordnGroupMetadata(name=$name, description=$description, adminPubkeys=$adminPubkeys, icon=$icon, imageUrl=$imageUrl, " +
+            "trailingFields=${trailingFields.toHexKey()})"
+
     fun toExtension(): Extension = Extension(EXTENSION_TYPE, encode())
 
     companion object {

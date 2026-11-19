@@ -314,7 +314,12 @@ class CordnAnnotationIndexTest {
         author,
         kind,
         "",
-        arrayOf(arrayOf("d", d), arrayOf("title", title), arrayOf("start", "1757000000"), arrayOf("alt", "Calendar event: $title")),
+        arrayOf(
+            arrayOf("d", d),
+            arrayOf("title", title),
+            arrayOf("start", if (kind == CordnMessageKinds.CALENDAR_DATE) "2025-09-04" else "1757000000"),
+            arrayOf("alt", "Calendar event: $title"),
+        ),
         createdAt = createdAt,
     )
 
@@ -424,5 +429,91 @@ class CordnAnnotationIndexTest {
         assertEquals("Standup", CordnCalendar.titleOf(calendarEvent(alice, "d1", "Standup", createdAt = 1).envelope))
         val untitled = message(alice, CordnMessageKinds.CALENDAR_DATE, "desc", arrayOf(arrayOf("d", "x"), arrayOf("alt", "Calendar event: Trip")))
         assertEquals("Calendar event: Trip", CordnCalendar.titleOf(untitled.envelope))
+    }
+
+    // ---- §2-§4 validation, and the kind 5 that cancels (audit 2026-11-19) ----
+
+    private fun valid(
+        kind: Int,
+        vararg tags: Array<String>,
+        content: String = "",
+    ) = CordnCalendar.isValidEvent(kind, content, arrayOf(*tags))
+
+    @Test
+    fun `an invalid revision supersedes nothing and is an unsupported event`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        // Newer, but with no title: cordn-web ignores it, so must we.
+        val broken = message(alice, CordnMessageKinds.CALENDAR_TIME, "", arrayOf(arrayOf("d", "d1"), arrayOf("start", "1757000000")), createdAt = 200)
+
+        val index = CordnAnnotationIndex.of(listOf(event, broken))
+
+        assertTrue(!index.isHidden(event.envelope.id), "the valid revision is still the current one")
+        assertTrue(!index.isRevised(event.envelope.id))
+        assertTrue(index.isUnsupportedEvent(broken.envelope.id))
+        assertTrue(!index.isUnsupportedEvent(event.envelope.id))
+    }
+
+    @Test
+    fun `a d that is not an identifier is no event, and no coordinate names one`() {
+        val colon = message(alice, CordnMessageKinds.CALENDAR_TIME, "", arrayOf(arrayOf("d", "a:b"), arrayOf("title", "t"), arrayOf("start", "1757000000")))
+        assertTrue(CordnAnnotationIndex.of(listOf(colon)).isUnsupportedEvent(colon.envelope.id))
+        assertEquals(null, CordnCalendar.cancelledCoordinate(CordnMessageKinds.DELETION, arrayOf(arrayOf("a", "31923:$alice:a:b"))))
+        assertEquals(null, CordnCalendar.cancelledCoordinate(CordnMessageKinds.DELETION, arrayOf(arrayOf("a", "31923:$alice:bad id"))))
+        assertEquals("31923:$alice:ok_id-1", CordnCalendar.cancelledCoordinate(CordnMessageKinds.DELETION, arrayOf(arrayOf("a", "31923:$alice:ok_id-1"))))
+    }
+
+    @Test
+    fun `a cancellation's e naming another message is an ordinary deletion`() {
+        val event = calendarEvent(alice, "d1", "Standup", createdAt = 100)
+        val text = message(alice, CordnMessageKinds.TEXT, "oops")
+        val cancel =
+            message(
+                alice,
+                CordnMessageKinds.DELETION,
+                "",
+                arrayOf(
+                    arrayOf("a", "${event.envelope.kind}:$alice:d1"),
+                    arrayOf("e", text.envelope.id),
+                    arrayOf("k", CordnMessageKinds.TEXT.toString()),
+                ),
+            )
+
+        val index = CordnAnnotationIndex.of(listOf(event, text, cancel))
+
+        assertTrue(index.isDeleted(text.envelope.id), "cordn-web's fold deletes it, so ours must")
+        assertTrue(index.isCancelled(event.envelope.id))
+        assertTrue(!index.isDeleted(event.envelope.id))
+    }
+
+    @Test
+    fun `calendar validation agrees with cordn-web`() {
+        val d = arrayOf("d", "x")
+        val title = arrayOf("title", "Trip")
+        val timed = CordnMessageKinds.CALENDAR_TIME
+        val date = CordnMessageKinds.CALENDAR_DATE
+
+        assertTrue(valid(timed, d, title, arrayOf("start", "1757000000")))
+        assertTrue(valid(timed, d, title, arrayOf("start", "17e8")), "Number('17e8') is an integer")
+        assertTrue(valid(timed, d, title, arrayOf("start", "1757000000"), arrayOf("end", "1757003600"), arrayOf("start_tzid", "Europe/Lisbon")))
+        assertTrue(!valid(timed, d, title, arrayOf("start", "1757000000"), arrayOf("end", "1757000000")), "an explicit end must be after the start")
+        assertTrue(!valid(timed, d, title, arrayOf("start", "0")))
+        assertTrue(!valid(timed, d, title, arrayOf("start", "253402300800")), "past four-digit years")
+        assertTrue(!valid(timed, d, title, arrayOf("start", "1.5")))
+        assertTrue(!valid(timed, d, arrayOf("start", "1757000000")), "a title is required")
+        assertTrue(!valid(timed, d, d, title, arrayOf("start", "1757000000")), "a repeated scalar rejects the event")
+        assertTrue(!valid(timed, d, arrayOf("title", "Trip", "extra"), arrayOf("start", "1757000000")))
+        assertTrue(!valid(timed, d, arrayOf("title", " Trip"), arrayOf("start", "1757000000")), "untrimmed")
+        assertTrue(!valid(timed, d, arrayOf("title", "Tr‮ip"), arrayOf("start", "1757000000")), "a bidi override")
+        assertTrue(!valid(timed, d, title, arrayOf("start", "1757000000"), arrayOf("r", "ftp://x")))
+        assertTrue(!valid(timed, d, title, arrayOf("start", "1757000000"), arrayOf("image", "javascript:alert(1)")))
+        assertTrue(valid(timed, d, title, arrayOf("start", "1757000000"), arrayOf("r", "https://example.com/a")))
+        assertTrue(!valid(timed, d, title, arrayOf("start", "1757000000"), content = "tab\there"), "control characters in the description")
+        assertTrue(valid(timed, d, title, arrayOf("start", "1757000000"), content = "line\nbreak"))
+
+        assertTrue(valid(date, d, title, arrayOf("start", "2024-02-29")))
+        assertTrue(!valid(date, d, title, arrayOf("start", "2025-02-29")))
+        assertTrue(valid(date, d, title, arrayOf("start", "2025-09-04"), arrayOf("end", "2025-09-06")))
+        assertTrue(!valid(date, d, title, arrayOf("start", "2025-09-04"), arrayOf("end", "2025-09-04")), "end is exclusive")
+        assertTrue(!valid(date, d, title, arrayOf("start", "1757000000")))
     }
 }

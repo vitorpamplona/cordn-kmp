@@ -99,6 +99,8 @@ class CordnAnnotationIndex private constructor(
     val revisedEvents: Set<HexKey>,
     /** Latest calendar revisions their author cancelled (§6): a cancelled card, not a deleted row. */
     val cancelledEvents: Set<HexKey>,
+    /** Calendar events that fail §3–§4 validation (§4: an "unsupported event" placeholder). */
+    val unsupportedEvents: Set<HexKey> = emptySet(),
 ) {
     /** Who pinned a message and when, kept so a pin list can be ordered. */
     data class PinState(
@@ -130,6 +132,9 @@ class CordnAnnotationIndex private constructor(
     /** Whether [id] is a calendar event its author cancelled. Not [isDeleted]: §6 shows it. */
     fun isCancelled(id: HexKey): Boolean = id in cancelledEvents
 
+    /** Whether [id] is a calendar event no client may project (§4): show "unsupported event". */
+    fun isUnsupportedEvent(id: HexKey): Boolean = id in unsupportedEvents
+
     /** Currently pinned targets, newest pin first. */
     fun pinnedIds(): List<HexKey> =
         pins.values
@@ -151,11 +156,17 @@ class CordnAnnotationIndex private constructor(
 
             val deleted = mutableSetOf<HexKey>()
             messages.forEach { message ->
-                // A calendar cancellation names its event's coordinate, and §6
-                // shows a cancelled card for it rather than "message deleted".
-                if (CordnCalendar.cancelledCoordinate(message.envelope.kind, message.envelope.tags) != null) return@forEach
                 val ref = CordnMessageReferences.delete(message.envelope.kind, message.envelope.tags) ?: return@forEach
                 val target = byId[ref.targetId] ?: return@forEach
+                // A calendar cancellation's `e` names the revision it cancels, and §6 shows a
+                // cancelled card for that rather than "message deleted": the calendar fold
+                // decides it. Any other `e` it carries is an ordinary deletion, as cordn-web's
+                // fold makes it.
+                if (CordnCalendar.cancelledCoordinate(message.envelope.kind, message.envelope.tags) != null &&
+                    CordnCalendar.coordinateOf(target) != null
+                ) {
+                    return@forEach
+                }
                 // A `k` that disagrees with the stored message is a mismatch.
                 if (ref.targetKind != target.envelope.kind) return@forEach
                 // Author-only. The pubkeys are MLS-authenticated, not claimed.
@@ -236,6 +247,7 @@ class CordnAnnotationIndex private constructor(
                 supersededRevisions = calendar.superseded,
                 revisedEvents = calendar.revised,
                 cancelledEvents = calendar.cancelled,
+                unsupportedEvents = calendar.invalid,
             )
         }
     }
