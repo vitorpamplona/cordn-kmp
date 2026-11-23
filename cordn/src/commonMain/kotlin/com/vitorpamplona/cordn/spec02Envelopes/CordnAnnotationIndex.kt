@@ -43,15 +43,42 @@ data class CordnDeliveredMessage(
      * the message, so it is encrypted at rest with it.
      */
     val mediaKey: ByteArray? = null,
+    /**
+     * When the coordinator received it, in Unix milliseconds: the `at` it reported for the
+     * message (`spec/00.md` §7, `msg_fetch_many`/`msg_post`), or null for a message stored
+     * before it was kept.
+     *
+     * Unlike the envelope's `created_at`, which is the sender's claim, this is the coordinator's
+     * clock, and it rises with the [cursor]. cordn-web judges a poll's deadline by it
+     * ([CordnPolls.tally]), so a vote whose sender backdated it past a closed poll does not
+     * count.
+     */
+    val receivedAt: Long? = null,
 ) {
+    /** The 1.6 constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
+    constructor(envelope: CordnEnvelope, cursor: Long, mediaKey: ByteArray?) : this(envelope, cursor, mediaKey, null)
+
+    /** The 1.6 `copy`, kept so code compiled against it still links. */
+    @Deprecated("Use copy with receivedAt.", level = DeprecationLevel.HIDDEN)
+    fun copy(
+        envelope: CordnEnvelope = this.envelope,
+        cursor: Long = this.cursor,
+        mediaKey: ByteArray? = this.mediaKey,
+    ): CordnDeliveredMessage = CordnDeliveredMessage(envelope, cursor, mediaKey, receivedAt)
+
+    /** The coordinator's receive time in Unix seconds when known, else the sender's `created_at`. */
+    val receivedAtSeconds: Long get() = receivedAt?.floorDiv(1000L) ?: envelope.createdAt
+
     // By content: a data class compares a ByteArray by reference.
     override fun equals(other: Any?): Boolean =
         other is CordnDeliveredMessage &&
             envelope == other.envelope &&
             cursor == other.cursor &&
+            receivedAt == other.receivedAt &&
             (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
 
-    override fun hashCode(): Int = 31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
+    override fun hashCode(): Int = 31 * (31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)) + receivedAt.hashCode()
 }
 
 /**

@@ -62,6 +62,13 @@ object CordnDeliveredMessageCodec {
     /** The carrying epoch's media key, hex. Optional: older entries do not have it, and older readers ignore it. */
     private const val MEDIA_KEY = "mk"
 
+    /**
+     * The coordinator's receive time, Unix ms ([CordnDeliveredMessage.receivedAt]). Optional like
+     * [MEDIA_KEY], and for the same reason: an entry stays version [VERSION], so an older reader
+     * still loads it and only ignores the field, and an entry without it loads with null.
+     */
+    private const val RECEIVED_AT = "r"
+
     /** `encrypted-media.md` §3.1: the media key is a 32-byte ChaCha20-Poly1305 key. */
     private const val MEDIA_KEY_SIZE = 32
 
@@ -73,6 +80,7 @@ object CordnDeliveredMessageCodec {
                 put(CURSOR, message.cursor)
                 put(ENVELOPE, message.envelope.toJsonObject())
                 message.mediaKey?.let { put(MEDIA_KEY, it.toHexKey()) }
+                message.receivedAt?.let { put(RECEIVED_AT, it) }
             },
         )
 
@@ -112,7 +120,16 @@ object CordnDeliveredMessageCodec {
                 ?.let { runCatching { it.hexToByteArray() }.getOrNull() }
                 ?.takeIf { it.size == MEDIA_KEY_SIZE }
 
-        return CordnDeliveredMessage(CordnEnvelope.fromJsonObject(envelope), cursor, mediaKey)
+        // Dropped rather than failing the entry, as the media key is: only a poll's deadline
+        // falls back to the sender's clock without it.
+        val receivedAt =
+            (json[RECEIVED_AT] as? JsonPrimitive)
+                ?.takeIf { !it.isString }
+                ?.content
+                ?.toLongOrNull()
+                ?.takeIf { it >= 0 }
+
+        return CordnDeliveredMessage(CordnEnvelope.fromJsonObject(envelope), cursor, mediaKey, receivedAt)
     }
 
     /**

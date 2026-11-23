@@ -106,6 +106,13 @@ class CordnFixtureCoordinator(
     private var nextCursor = 1L
     private var clock = 1_700_000_000L
 
+    /**
+     * The receive time (`at`, Unix ms on a real coordinator) a posted or seeded message gets. Null
+     * uses the fixture's own counter, which is unique but not a wall clock; a test that judges a
+     * poll's deadline sets this.
+     */
+    var messageClock: (() -> Long)? = null
+
     /** Messages posted to [gid], oldest first. */
     fun posted(gid: String): List<String> = messages[gid].orEmpty().map { it[CoordinatorFields.MSG_64]!!.jsonPrimitive.content }
 
@@ -120,7 +127,7 @@ class CordnFixtureCoordinator(
                 put(CoordinatorFields.GID, gid)
                 put(CoordinatorFields.CURSOR, cursor)
                 put(CoordinatorFields.MSG_64, sealedBase64)
-                put(CoordinatorFields.AT, clock++)
+                put(CoordinatorFields.AT, messageClock?.invoke() ?: clock++)
             }
         return cursor
     }
@@ -377,7 +384,8 @@ class CordnFixtureCoordinator(
                     buildJsonObject {
                         put(CoordinatorFields.GID, gid)
                         put(CoordinatorFields.CURSOR, cursor)
-                        put(CoordinatorFields.AT, clock)
+                        // The `at` it was filed under, which a fetch reports too.
+                        put(CoordinatorFields.AT, messages.getValue(gid).last()[CoordinatorFields.AT]!!)
                     }
                 }
 

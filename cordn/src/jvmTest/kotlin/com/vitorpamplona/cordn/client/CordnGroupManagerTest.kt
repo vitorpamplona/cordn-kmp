@@ -166,7 +166,7 @@ class CordnGroupManagerTest {
             assertEquals(bob, invite.invited)
             assertEquals(1L, aliceManager.group(gid)!!.epoch, "adding a member advances the epoch")
 
-            aliceManager.send(gid, "hello bob")
+            val sent = aliceManager.send(gid, "hello bob")
 
             // Bob's side, from nothing but what the coordinator holds.
             val bobCoordinator = FakeCoordinator(callerPubKey = bob)
@@ -186,6 +186,17 @@ class CordnGroupManagerTest {
             assertEquals("hello bob", messages[0].received.envelope.content)
             assertEquals(alice, messages[0].received.sender, "the sender is MLS-authenticated, not claimed")
             assertEquals(CordnGroupManager.CHAT_KIND, messages[0].received.envelope.kind)
+
+            // The coordinator's receive time rides along, on both sides, as the same value:
+            // a poll's deadline is judged by it (CordnPolls).
+            val filedAt =
+                coordinator.streams
+                    .getValue(gid)
+                    .last()
+                    .at
+            assertEquals(filedAt, messages[0].delivered.receivedAt)
+            assertEquals(filedAt, sent.receivedAt)
+            assertEquals(filedAt, bobManager.storedMessages(gid).single().receivedAt)
         }
 
     @Test

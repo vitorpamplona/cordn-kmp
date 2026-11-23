@@ -38,10 +38,10 @@ import com.vitorpamplona.quartz.nip01Core.core.fastFirstOrNull
  * - **Tally**: one vote per account, its latest in coordinator order. A vote that names an
  *   unknown option, picks more than one in a single-choice poll, or came after the deadline
  *   does not count. Deletions do not retract votes (cordn-web, after NIP-88).
- *
- * One known difference: cordn-web judges the deadline by the coordinator's receive time, which
- * [CordnDeliveredMessage] does not keep; this uses the vote's `created_at`, so a vote whose
- * sender backdated it past a closed poll counts here and not there.
+ * - **Deadline**: judged by when the coordinator received the vote
+ *   ([CordnDeliveredMessage.receivedAt], whole seconds), as cordn-web judges it, not by the
+ *   vote's `created_at`, which is the sender's claim: a vote backdated past a closed poll does
+ *   not count. A message stored before the receive time was kept falls back to `created_at`.
  */
 object CordnPolls {
     const val MIN_OPTIONS = 2
@@ -168,7 +168,7 @@ object CordnPolls {
             if (response.pollId != pollId) return@forEach
             // A vote the coordinator sequenced before the poll cannot be for it.
             if (message.cursor < poll.cursor) return@forEach
-            if (definition.endsAt != null && message.envelope.createdAt > definition.endsAt) return@forEach
+            if (definition.endsAt != null && message.receivedAtSeconds > definition.endsAt) return@forEach
             if (definition.type == Type.SINGLE && response.optionIds.size != 1) return@forEach
             if (!response.optionIds.all { it in known }) return@forEach
 

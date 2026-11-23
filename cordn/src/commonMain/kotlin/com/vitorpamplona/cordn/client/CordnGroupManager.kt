@@ -164,9 +164,15 @@ class CordnGroupManager(
              * [CordnDeliveredMessage.mediaKey].
              */
             val mediaKey: ByteArray? = null,
+            /** When the coordinator received it, Unix ms. See [CordnDeliveredMessage.receivedAt]. */
+            val receivedAt: Long? = null,
         ) : Delivery {
+            /** The 1.6 constructor, kept so code compiled against it still links. */
+            @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
+            constructor(gid: String, cursor: Long, received: ReceivedMessage, mediaKey: ByteArray?) : this(gid, cursor, received, mediaKey, null)
+
             /** The message as the store and a room hold it. */
-            val delivered: CordnDeliveredMessage get() = CordnDeliveredMessage(received.envelope, cursor, mediaKey)
+            val delivered: CordnDeliveredMessage get() = CordnDeliveredMessage(received.envelope, cursor, mediaKey, receivedAt)
 
             // By content: a data class compares a ByteArray by reference.
             override fun equals(other: Any?): Boolean =
@@ -174,9 +180,10 @@ class CordnGroupManager(
                     gid == other.gid &&
                     cursor == other.cursor &&
                     received == other.received &&
+                    receivedAt == other.receivedAt &&
                     (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
 
-            override fun hashCode(): Int = 31 * (31 * (31 * gid.hashCode() + cursor.hashCode()) + received.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
+            override fun hashCode(): Int = 31 * (31 * (31 * (31 * gid.hashCode() + cursor.hashCode()) + received.hashCode()) + (mediaKey?.contentHashCode() ?: 0)) + receivedAt.hashCode()
         }
 
         /** A handshake message; the group has advanced to [epoch]. */
@@ -1303,7 +1310,7 @@ class CordnGroupManager(
             // Our own message never arrives as a Delivery.Message — it comes back
             // as an Echo, which by design carries nothing — so the only place it
             // can be recorded is here, where we still hold the plaintext.
-            val delivered = CordnDeliveredMessage(envelope, posted.cursor, mediaKey)
+            val delivered = CordnDeliveredMessage(envelope, posted.cursor, mediaKey, posted.at)
             slot.pendingMessages.addLast(delivered)
             persistQuietly(gid)
             delivered
@@ -1388,7 +1395,7 @@ class CordnGroupManager(
 
             is Ingestion.Process -> {
                 slot.dirty = true
-                ingestPayload(gid, slot, ingestion.cursor, ingestion.sealedBase64, emit)
+                ingestPayload(gid, slot, ingestion.cursor, ingestion.sealedBase64, ingestion.at, emit)
             }
         }
     }
@@ -1555,6 +1562,7 @@ class CordnGroupManager(
         slot: Slot,
         cursor: Long,
         sealed: String,
+        receivedAt: Long?,
         emit: (Delivery) -> Unit,
     ) {
         val inbox = sync.inbox(gid)
@@ -1569,7 +1577,7 @@ class CordnGroupManager(
         // construction (spec/03.md §5).
         val keys = keysOf(slot)
         val opened = runCatching { SealedPayload.open(payload, keys.payload) }.getOrNull()
-        if (opened == null) return ingestFromFormerEpoch(gid, slot, cursor, payload, emit)
+        if (opened == null) return ingestFromFormerEpoch(gid, slot, cursor, payload, receivedAt, emit)
 
         val group = slot.group
         val epoch = group.epoch
@@ -1593,9 +1601,9 @@ class CordnGroupManager(
                         ContentType.APPLICATION -> {
                             val received = CordnApplicationMessage.open(decrypted)
                             // The key that sealed its attachments is the epoch's it was read at.
-                            val delivered = CordnDeliveredMessage(received.envelope, cursor, keys.media)
+                            val delivered = CordnDeliveredMessage(received.envelope, cursor, keys.media, receivedAt)
                             slot.pendingMessages.addLast(delivered)
-                            emit(Delivery.Message(gid, cursor, received, keys.media))
+                            emit(Delivery.Message(gid, cursor, received, keys.media, receivedAt))
                         }
                         // decrypt() applies a Commit, so the epoch has moved already.
                         else -> {
@@ -1642,6 +1650,7 @@ class CordnGroupManager(
         slot: Slot,
         cursor: Long,
         payload: ByteArray,
+        receivedAt: Long?,
         emit: (Delivery) -> Unit,
     ) {
         val group = slot.group
@@ -1668,8 +1677,8 @@ class CordnGroupManager(
                 return emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch by a sender no longer in the group"))
             }
             val mediaKey = keys.formerMedia.getOrPut(epoch) { CordnMediaEncryption.mediaKeyAt(group, epoch) }
-            slot.pendingMessages.addLast(CordnDeliveredMessage(received.envelope, cursor, mediaKey))
-            emit(Delivery.Message(gid, cursor, received, mediaKey))
+            slot.pendingMessages.addLast(CordnDeliveredMessage(received.envelope, cursor, mediaKey, receivedAt))
+            emit(Delivery.Message(gid, cursor, received, mediaKey, receivedAt))
         } catch (e: Exception) {
             emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch: ${e.message ?: "could not open payload"}"))
         }

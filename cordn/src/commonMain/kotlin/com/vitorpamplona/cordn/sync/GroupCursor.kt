@@ -98,6 +98,8 @@ sealed interface Ingestion {
     data class Process(
         override val cursor: Long,
         val sealedBase64: String,
+        /** The coordinator's receive time for it, Unix ms ([GroupMessage.at]). */
+        val at: Long? = null,
     ) : Ingestion
 }
 
@@ -282,7 +284,7 @@ class GroupInbox(
             return Ingestion.OwnMessage(message.cursor)
         }
 
-        return Ingestion.Process(message.cursor, message.sealedBase64)
+        return Ingestion.Process(message.cursor, message.sealedBase64, message.at)
     }
 
     /**
