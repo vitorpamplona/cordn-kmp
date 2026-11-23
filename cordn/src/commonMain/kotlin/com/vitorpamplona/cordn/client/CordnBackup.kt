@@ -22,6 +22,7 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessageCodec
+import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.crypto.chacha.ChaCha20Poly1305
 import com.vitorpamplona.crypto.random.RandomInstance
@@ -73,6 +74,8 @@ import com.vitorpamplona.quartz.nip49PrivKeyEnc.SCrypt
  *
  * ```
  * magic "CORDNBAK" | version:u16 | logN:u8 | salt:16 | nonce:12 | ChaCha20-Poly1305(payload)
+ *
+ * `logN` is 10 to 18.
  * ```
  *
  * The header is passed as the AEAD's associated data. Today that is belt and
@@ -100,7 +103,18 @@ object CordnBackup {
      * still open. Carrying the plaintext is what makes the restore whole
      * regardless of how many times the group has rotated since.
      */
-    const val VERSION = 2
+    const val VERSION = 3
+
+    /**
+     * Version 2: messages but no echo record. Still readable; its groups restore with none.
+     *
+     * The echo record ([EchoState]) is what recognises this device's own Commits and messages
+     * on the stream, holds the Welcomes a confirmed Commit still owes, and carries the
+     * evidence of payloads it could not open (the BEHIND gate). A restore without it re-reads its
+     * own staged Commit as somebody else's, never sends those Welcomes, and forgets that it may
+     * be behind; version 3 carries it.
+     */
+    private const val VERSION_WITHOUT_ECHO = 2
 
     /** The last version that carried no messages; still readable. */
     private const val VERSION_WITHOUT_MESSAGES = 1
@@ -111,6 +125,11 @@ object CordnBackup {
      * Matches NIP-49's default. A backup is decrypted once in a while by its
      * owner, never in a loop, so the cost belongs at the high end of what a
      * phone will tolerate rather than tuned for throughput.
+     *
+     * At most [MAX_LOG_N]: the cost is read from the header, which nothing
+     * authenticates until after the key it sets is derived, so a file that
+     * named 2^22 made the device spend 4 GiB of scrypt memory before the AEAD
+     * could refuse it.
      */
     const val DEFAULT_LOG_N = 16
 
@@ -143,7 +162,31 @@ object CordnBackup {
              * there is nothing in the file to do better with.
              */
             val messages: List<CordnDeliveredMessage> = emptyList(),
+            /** The group's echo record (version 3 on), or null when the file carried none. */
+            val echoState: EchoState? = null,
         ) {
+            /** The 1.6 constructor, kept so code compiled against it still links. */
+            @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
+            constructor(
+                coordinatorPubKey: HexKey,
+                gid: String,
+                state: ByteArray,
+                cursor: GroupCursor?,
+                joinedViaRequest: Boolean,
+                messages: List<CordnDeliveredMessage>,
+            ) : this(coordinatorPubKey, gid, state, cursor, joinedViaRequest, messages, null)
+
+            /** The 1.6 `copy`, kept so code compiled against it still links. */
+            @Deprecated("Use copy with echoState.", level = DeprecationLevel.HIDDEN)
+            fun copy(
+                coordinatorPubKey: HexKey = this.coordinatorPubKey,
+                gid: String = this.gid,
+                state: ByteArray = this.state,
+                cursor: GroupCursor? = this.cursor,
+                joinedViaRequest: Boolean = this.joinedViaRequest,
+                messages: List<CordnDeliveredMessage> = this.messages,
+            ): Group = Group(coordinatorPubKey, gid, state, cursor, joinedViaRequest, messages, echoState)
+
             override fun equals(other: Any?): Boolean =
                 this === other ||
                     (
@@ -154,7 +197,8 @@ object CordnBackup {
                             cursor?.fetchCursor == other.cursor?.fetchCursor &&
                             cursor?.lastCursor == other.cursor?.lastCursor &&
                             joinedViaRequest == other.joinedViaRequest &&
-                            messages == other.messages
+                            messages == other.messages &&
+                            echoState == other.echoState
                     )
 
             override fun hashCode(): Int {
@@ -164,6 +208,7 @@ object CordnBackup {
                 result = 31 * result + (cursor?.fetchCursor?.hashCode() ?: 0)
                 result = 31 * result + joinedViaRequest.hashCode()
                 result = 31 * result + messages.hashCode()
+                result = 31 * result + echoState.hashCode()
                 return result
             }
         }
@@ -186,7 +231,7 @@ object CordnBackup {
             override fun hashCode(): Int = 31 * (31 * coordinatorPubKey.hashCode() + keyPackageRef.hashCode()) + bundle.contentHashCode()
         }
 
-        /** What [restore][CordnLocalState.write] lays down. A backup carries no room or echo state. */
+        /** What [restore][CordnLocalState.write] lays down. A backup carries no room state. */
         fun toLocalState(): CordnLocalState =
             CordnLocalState(
                 groups =
@@ -197,7 +242,7 @@ object CordnBackup {
                             state = it.state,
                             cursor = it.cursor,
                             roomState = null,
-                            echoState = null,
+                            echoState = it.echoState,
                             joinedViaRequest = it.joinedViaRequest,
                             messages = it.messages,
                         )
@@ -215,7 +260,7 @@ object CordnBackup {
                 Archive(
                     accountPubKey = accountPubKey,
                     coordinators = coordinators,
-                    groups = state.groups.map { Group(it.coordinatorPubKey, it.gid, it.state, it.cursor, it.joinedViaRequest, it.messages) },
+                    groups = state.groups.map { Group(it.coordinatorPubKey, it.gid, it.state, it.cursor, it.joinedViaRequest, it.messages, it.echoState) },
                     keyPackages = state.keyPackages.map { KeyPackage(it.coordinatorPubKey, it.keyPackageRef, it.bundle) },
                 )
         }
@@ -252,7 +297,7 @@ object CordnBackup {
 
         val reader = TlsReader(sealed.copyOfRange(MAGIC.size, HEADER_LENGTH))
         val version = reader.readUint16()
-        require(version == VERSION || version == VERSION_WITHOUT_MESSAGES) { "unknown cordn backup version $version" }
+        require(version == VERSION || version == VERSION_WITHOUT_ECHO || version == VERSION_WITHOUT_MESSAGES) { "unknown cordn backup version $version" }
 
         val logN = reader.readUint8()
         val salt = reader.readBytes(SALT_LENGTH)
@@ -313,6 +358,9 @@ object CordnBackup {
             it.messages.forEach { message ->
                 writer.putOpaque4(CordnDeliveredMessageCodec.encode(message).encodeToByteArray())
             }
+            // Version 3: the echo record, in the store's own encoding.
+            writer.putUint8(if (it.echoState != null) 1 else 0)
+            it.echoState?.let { echo -> writer.putOpaque4(EchoStateCodec.encode(echo)) }
         }
 
         writer.putUint16(archive.keyPackages.size)
@@ -350,7 +398,15 @@ object CordnBackup {
                             CordnDeliveredMessageCodec.decodeOrNull(reader.readOpaque4().decodeToString())
                         }
                     }
-                Archive.Group(coordinator, gid, state, cursor, joinedViaRequest, messages)
+                val echoState =
+                    if (version < VERSION || reader.readUint8() == 0) {
+                        null
+                    } else {
+                        // Like a message: an echo record that will not parse is dropped, not
+                        // the restore. The group then comes back as a version 2 file left it.
+                        reader.readOpaque4().let { runCatching { EchoStateCodec.decode(it) }.getOrNull() }
+                    }
+                Archive.Group(coordinator, gid, state, cursor, joinedViaRequest, messages, echoState)
             }
 
         val keyPackages =
@@ -366,6 +422,8 @@ object CordnBackup {
     }
 
     private const val MIN_LOG_N = 10
-    private const val MAX_LOG_N = 22
+
+    /** 2^18 scrypt is 256 MiB with r = 8; [DEFAULT_LOG_N] is a quarter of it. */
+    private const val MAX_LOG_N = 18
     private val HEADER_LENGTH = MAGIC.size + 2 + 1 + SALT_LENGTH + NONCE_LENGTH
 }

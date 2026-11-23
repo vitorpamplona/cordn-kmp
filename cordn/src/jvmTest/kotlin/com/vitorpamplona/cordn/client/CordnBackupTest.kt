@@ -22,14 +22,18 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
+import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalEncodingApi::class)
 class CordnBackupTest {
     private val account = "a".repeat(64)
     private val coordinator = "b".repeat(64)
@@ -197,8 +201,58 @@ class CordnBackupTest {
         assertEquals(emptyList(), opened.groups.first { it.gid == "room-2" }.messages)
     }
 
+    @Test
+    fun `the echo record survives the round trip`() {
+        val echo = EchoState(ownMessageCursors = listOf(7, 8), unopenable = 2)
+        val withEcho = archive.copy(groups = archive.groups.map { if (it.gid == "room-1") it.copy(echoState = echo) else it })
+        val opened = CordnBackup.open(CordnBackup.seal(withEcho, "pw", cheap), "pw")
+
+        assertEquals(echo, opened.groups.first { it.gid == "room-1" }.echoState)
+        assertEquals(null, opened.groups.first { it.gid == "room-2" }.echoState)
+        assertEquals(
+            echo,
+            opened
+                .toLocalState()
+                .groups
+                .first { it.gid == "room-1" }
+                .echoState,
+            "a restore lays it down",
+        )
+    }
+
+    @Test
+    fun `a version 2 file still opens, with no echo record`() {
+        // Sealed by 1.7.0-candidate code (version 2, logN 10, passphrase "frozen"). Frozen: never regenerate.
+        val opened = CordnBackup.open(Base64.decode(V2_FILE), "frozen")
+        val group = opened.groups.single()
+        assertEquals("room-1", group.gid)
+        assertEquals(GroupCursor(7, 9), group.cursor)
+        assertEquals(null, group.echoState)
+        assertEquals(listOf("kp-ref"), opened.keyPackages.map { it.keyPackageRef })
+    }
+
+    @Test
+    fun `a header asking for more scrypt than any backup uses is refused before the KDF runs`() {
+        // logN sits in front of the AEAD check, so an edited header used to cost the device the
+        // memory it asked for (2^22: 4 GiB) before the tag could refuse it.
+        val sealed = CordnBackup.seal(archive, "pw", cheap)
+        sealed[MAGIC_LENGTH + 2] = 19
+        val error = assertFailsWith<IllegalArgumentException> { CordnBackup.open(sealed, "pw") }
+        assertTrue(error.message!!.contains("scrypt cost"), error.message)
+        // The default still opens.
+        assertEquals(archive, CordnBackup.open(CordnBackup.seal(archive, "pw"), "pw"))
+    }
+
     private companion object {
         const val MAGIC_LENGTH = 8
+
+        val V2_FILE =
+            "Q09SRE5CQUsAAgrats/LV/DVHgpfeQlKTaCIOscr8+HCtlATomhFDunPnUzRV61IJ21kXoSKLlBE4qs9odA+c1B3xXUAuBHgVkdz" +
+                "81SWjB41mXnxWUf+xAZtDyRmxGWffBMuZxmBxdQaDInpbuxJxM1bLeEkETvX3Y7RJFFUwJNCw+DWXHEP+Pze/fYhntJxVS6dA/on" +
+                "xeEsBfEI85Zem18j567PFhDrA4ZDm9xBfOzV1BEA9/FqRxB2IYeeSA+k8xwya0AhJJ8kVklCwEXHp1CjgfhY4lOvKZelAc5eBoTY" +
+                "BRD9w8H24IQTKsqzLWD2/QZvwIcb/6P931HkuTccV//U6zujBTnhdoxq1rcYlYT+AZSlzTKcodkAL+V3rVpEUFsTkJWqVYYLgz+b" +
+                "H+A1g5cQDYhTgzpGgoecDm8WrDsLKUJbZKVkq0IHQeKNjoE+VI8mkEKTno/F1Ii0H/Eefa5tBzfg3ZKYaUF+aTG/5ih27ft09Fff" +
+                "8/pkZkuMeZ+pChrvmNEqUw3xXKGdRHW+y2WkIW/w2r9A97x6Uvj5ealtMm+L"
 
         /** magic(8) + version(2) + logN(1). */
         const val SALT_AT = 11
