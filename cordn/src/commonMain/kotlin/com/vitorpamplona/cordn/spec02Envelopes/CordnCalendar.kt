@@ -42,8 +42,9 @@ import kotlin.math.floor
  * rules are cordn-web's (`getCalendarEventDefinition`) wherever the spec leaves room; the plan
  * lists the few places they could not be ported exactly.
  *
- * Not here (yet): RSVP tallies and day coverage. Those belong to a calendar view, which is
- * upstream's P2; the stream needs only this.
+ * RSVPs (§7, kind 31925) fold onto the event they name: one per account, its newest (`created_at`,
+ * then cursor), as cordn-web's `buildCalendarProjection` keeps them. Not here (yet): day coverage,
+ * which belongs to a calendar view.
  */
 object CordnCalendar {
     /** What the stream needs to know about the group's calendar events. */
@@ -56,6 +57,36 @@ object CordnCalendar {
         val cancelled: Set<HexKey>,
         /** Calendar events that fail §3–§4 validation: an "unsupported event", never a card. */
         val invalid: Set<HexKey> = emptySet(),
+        /** Latest revision → who answered its RSVP, each list in cursor order (§7). */
+        val attendees: Map<HexKey, Attendees> = emptyMap(),
+    )
+
+    /** The answers an RSVP may carry (§7). */
+    enum class RsvpStatus(
+        val wire: String,
+    ) {
+        ACCEPTED("accepted"),
+        TENTATIVE("tentative"),
+        DECLINED("declined"),
+        ;
+
+        companion object {
+            fun of(wire: String?): RsvpStatus? = entries.firstOrNull { it.wire == wire }
+        }
+    }
+
+    /** One RSVP: the event's coordinate (normalised, as [coordinateOf] writes it) and the answer. */
+    data class Rsvp(
+        val coordinate: String,
+        val eventId: HexKey?,
+        val status: RsvpStatus,
+    )
+
+    /** An event's current RSVPs, one per account. */
+    data class Attendees(
+        val going: List<HexKey>,
+        val maybe: List<HexKey>,
+        val declined: List<HexKey>,
     )
 
     /** `kind:author:d`, the address of an event (§2). */
@@ -134,7 +165,25 @@ object CordnCalendar {
         tags: TagArray,
     ): String? {
         if (kind != CordnMessageKinds.DELETION) return null
-        val value = tags.tagValue("a") ?: return null
+        return parseCoordinate(tags.tagValue("a") ?: return null)
+    }
+
+    /**
+     * The RSVP [kind]/[tags] carry (§7): an `a` naming a calendar event and a `status` of
+     * `accepted`, `tentative` or `declined`. cordn-web's `getCalendarRsvpReference`.
+     */
+    fun rsvp(
+        kind: Int,
+        tags: TagArray,
+    ): Rsvp? {
+        if (kind != CordnMessageKinds.CALENDAR_RSVP) return null
+        val coordinate = parseCoordinate(tags.tagValue("a") ?: return null) ?: return null
+        val status = RsvpStatus.of(tags.tagValue("status")) ?: return null
+        return Rsvp(coordinate, tags.tagValue("e"), status)
+    }
+
+    /** A `kind:author:d` naming a calendar event, normalised (lowercase author), or null. */
+    private fun parseCoordinate(value: String): String? {
         val parts = value.split(':')
         // A `d` is an identifier (§2), so a coordinate has exactly three parts; an event whose
         // `d` held a ':' was never valid, and so never cancellable either.
@@ -163,8 +212,19 @@ object CordnCalendar {
         val revisionCount = mutableMapOf<String, Int>()
         val cancellations = mutableMapOf<String, Long>()
         val invalid = mutableSetOf<HexKey>()
+        // coordinate → account → its newest RSVP
+        val rsvps = mutableMapOf<String, MutableMap<HexKey, Pair<CordnDeliveredMessage, RsvpStatus>>>()
 
         messages.forEach { message ->
+            val rsvp = rsvp(message.envelope.kind, message.envelope.tags)
+            if (rsvp != null) {
+                val byAuthor = rsvps.getOrPut(rsvp.coordinate) { mutableMapOf() }
+                val sender = message.envelope.pubKey.lowercase()
+                val current = byAuthor[sender]
+                if (current == null || isNewer(message, current.first)) byAuthor[sender] = message to rsvp.status
+                return@forEach
+            }
+
             val cancelled = cancelledCoordinate(message.envelope.kind, message.envelope.tags)
             if (cancelled != null) {
                 // Author-only, as §6 says: someone else's cancellation is ignored outright, so it
@@ -197,7 +257,15 @@ object CordnCalendar {
                 .values
                 .mapTo(mutableSetOf()) { it.envelope.id }
 
-        return Fold(superseded, revised, cancelled, invalid)
+        val attendees =
+            latest.entries.associate { (coordinate, revision) ->
+                val answers = rsvps[coordinate]?.entries?.sortedBy { it.value.first.cursor } ?: emptyList()
+
+                fun with(status: RsvpStatus) = answers.filter { it.value.second == status }.map { it.key }
+                revision.envelope.id to Attendees(with(RsvpStatus.ACCEPTED), with(RsvpStatus.TENTATIVE), with(RsvpStatus.DECLINED))
+            }
+
+        return Fold(superseded, revised, cancelled, invalid, attendees)
     }
 
     /** §5: `created_at` first, the coordinator cursor as the tie-break. */
@@ -223,9 +291,17 @@ object CordnCalendar {
     /** cordn-web's `displayText.ts`: no C0/C1 controls, and no bidirectional overrides (a spoofing surface). */
     private val BIDI = Regex("[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
-    private fun isSafeDisplayText(value: String): Boolean =
+    /**
+     * cordn-web's `isSafeDisplayText`: trimmed, non-empty, at most [maxBytes] of UTF-8, and free of
+     * control and bidirectional override characters. Shared with [CordnPolls], as upstream shares it.
+     */
+    internal fun isSafeDisplayText(
+        value: String,
+        maxBytes: Int = Int.MAX_VALUE,
+    ): Boolean =
         value.isNotEmpty() &&
             value.trim() == value &&
+            (maxBytes == Int.MAX_VALUE || value.encodeToByteArray().size <= maxBytes) &&
             value.none { it.code in 0x00..0x1f || it.code in 0x7f..0x9f } &&
             !BIDI.containsMatchIn(value)
 
@@ -263,7 +339,7 @@ object CordnCalendar {
      * `end` with, so a value it accepts (`" 1700000000"`, `"17e8"`, `"0x10"`) is accepted here too
      * and the two clients agree on which revision is valid.
      */
-    private fun jsInteger(value: String): Long? {
+    internal fun jsInteger(value: String): Long? {
         val trimmed = value.trim()
         val number: Double =
             when {

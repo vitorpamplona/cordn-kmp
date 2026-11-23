@@ -20,7 +20,11 @@
  */
 package com.vitorpamplona.cordn.client
 
+import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
+import com.vitorpamplona.cordn.spec02Envelopes.CordnMessageKinds
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
+import com.vitorpamplona.quartz.nip01Core.core.fastAny
+import com.vitorpamplona.quartz.nip01Core.core.fastFirstOrNull
 import com.vitorpamplona.quartz.nip19Bech32.decodePublicKeyAsHexOrNull
 
 /**
@@ -97,6 +101,26 @@ object CordnMentions {
             .filterIsInstance<Segment.Mention>()
             .map { it.pubKey }
             .distinct()
+
+    /**
+     * The row a message from someone else draws [viewer]'s attention to, or null when it does not.
+     *
+     * cordn-web's rule (`chatMessageReferencesPubkey` and `buildMessageLedgerRows`): a message
+     * refers to an account when one of its `p` tags names it, which covers a mention, a reply to
+     * one of its messages, and a reaction, vote or pin on one. A kind that is never a row (a
+     * reaction, a vote) points at the message its `e` names instead of at itself. Content alone
+     * does not count: a `nostr:npub` without its `p` tag is shown as a mention but notifies nobody.
+     */
+    fun attentionTarget(
+        envelope: CordnEnvelope,
+        viewer: HexKey,
+    ): HexKey? {
+        val me = viewer.trim().lowercase()
+        if (envelope.pubKey.trim().lowercase() == me) return null
+        if (!envelope.tags.fastAny { it.size >= 2 && it[0] == "p" && it[1].trim().lowercase() == me }) return null
+        if (!CordnMessageKinds.isStreamHidden(envelope.kind)) return envelope.id
+        return envelope.tags.fastFirstOrNull { it.isNotEmpty() && it[0] == "e" }?.getOrNull(1) ?: envelope.id
+    }
 
     private const val NOSTR_PREFIX = "nostr:"
 

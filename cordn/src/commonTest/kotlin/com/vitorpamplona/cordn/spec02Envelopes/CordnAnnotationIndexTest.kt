@@ -92,6 +92,40 @@ class CordnAnnotationIndexTest {
     }
 
     @Test
+    fun `the later delivered edit wins even from a device whose clock is behind`() {
+        // cordn-web orders edits by when the coordinator got them; created_at is the sender's clock.
+        val note = message(alice, CordnMessageKinds.TEXT, "draft", createdAt = 100)
+        val tags = CordnMessageReferences.editTags(note.asTarget())
+        val index =
+            CordnAnnotationIndex.of(
+                listOf(
+                    note,
+                    message(alice, CordnMessageKinds.EDIT, "from the laptop", tags, createdAt = 600),
+                    message(alice, CordnMessageKinds.EDIT, "from the phone", tags, createdAt = 300),
+                ),
+            )
+        assertEquals("from the phone", index.contentOf(note.envelope.id))
+    }
+
+    @Test
+    fun `a deleted message is no longer pinned and shows no reactions`() {
+        val note = message(alice, CordnMessageKinds.TEXT, "soon gone")
+        val t = note.asTarget()
+        val index =
+            CordnAnnotationIndex.of(
+                listOf(
+                    note,
+                    message(bob, CordnMessageKinds.PIN, "", CordnMessageReferences.pinTags(t, PinOp.ADD)),
+                    message(bob, CordnMessageKinds.REACTION, "+", CordnMessageReferences.reactionTags(t)),
+                    message(alice, CordnMessageKinds.DELETION, "", CordnMessageReferences.deleteTags(t)),
+                ),
+            )
+        assertTrue(!index.isPinned(note.envelope.id))
+        assertEquals(emptyList(), index.pinnedIds())
+        assertEquals(emptyMap(), index.reactionsOf(note.envelope.id))
+    }
+
+    @Test
     fun `an edit by someone else changes nothing at all`() {
         // Stated separately because it is the whole point: without the author
         // check, anyone in the group can rewrite anyone's words.

@@ -177,6 +177,22 @@ class CordnMediaEncryptionTest {
     }
 
     @Test
+    fun `the waveform is written in cordn-web's format and the old one still reads`() {
+        // cordn-web writes and reads comma-separated 0..1 peaks with three decimals, and drops
+        // anything else; 1.5.0 wrote space-separated 0..32767 amplitudes.
+        val fromRecorder = CordnMediaTag.build(roundTrip(), url = "https://b.example.com/a", waveform = listOf(3277f, 32767f, 0f), durationMs = 4200)
+        assertTrue("${CordnMediaTag.WAVEFORM} 0.100,1.000,0.000" in fromRecorder)
+        assertTrue("${CordnMediaTag.DURATION} 4200" in fromRecorder)
+        assertEquals(4200.0, CordnMediaTag.parseAll(arrayOf(fromRecorder)).single().durationMs)
+
+        val legacy = CordnMediaTag.build(roundTrip(), url = "https://b.example.com/a") + "${CordnMediaTag.WAVEFORM} 32767.0 16383.5"
+        assertEquals(listOf(1f, 0.5f), CordnMediaTag.parseAll(arrayOf(legacy)).single().waveform)
+
+        val outOfRange = CordnMediaTag.build(roundTrip(), url = "https://b.example.com/a") + "${CordnMediaTag.WAVEFORM} 0.5,7,0.25"
+        assertEquals(listOf(0.5f, 0.25f), CordnMediaTag.parseAll(arrayOf(outOfRange)).single().waveform)
+    }
+
+    @Test
     fun `a hint that is absent or malformed costs the hint rather than the attachment`() {
         // Every one of these is optional, so a reader that cannot make sense of
         // one must still be able to fetch and open the file.

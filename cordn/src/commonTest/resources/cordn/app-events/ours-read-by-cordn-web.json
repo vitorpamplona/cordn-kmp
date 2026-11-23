@@ -1,0 +1,1124 @@
+{
+ "generator": "cordn/tools/cordn-vector-gen/app-events.mjs",
+ "reference": "cordn-web 0.7.0 (949dfdf)",
+ "producer": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+ "cases": [
+  {
+   "name": "text",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "2b4ec5293b2c7249805c35acec1d1dbcf5ab780f542f620dc8732a90c9b56080",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "hello, group"
+     }
+    }
+   ],
+   "expect": {
+    "2b4ec5293b2c7249805c35acec1d1dbcf5ab780f542f620dc8732a90c9b56080": {
+     "row": true
+    }
+   }
+  },
+  {
+   "name": "reply, then a reply to the reply keeps the root",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "lunch?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "9599c0d31f6527e9779c0ae7242e48e1acfb12608cdc70fcedcd3824cf7be1b2",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1111,
+      "tags": [
+       [
+        "E",
+        "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "K",
+        "9"
+       ],
+       [
+        "P",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "e",
+        "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ]
+      ],
+      "content": "yes"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "e676bf2025047c553ae179daa104c7e43ffd2dfde26dac7d4a9a9e09c4427706",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1111,
+      "tags": [
+       [
+        "E",
+        "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "K",
+        "9"
+       ],
+       [
+        "P",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "e",
+        "9599c0d31f6527e9779c0ae7242e48e1acfb12608cdc70fcedcd3824cf7be1b2",
+        "",
+        "b0b0000000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1111"
+       ],
+       [
+        "p",
+        "b0b0000000000000000000000000000000000000000000000000000000000000"
+       ]
+      ],
+      "content": "me too"
+     }
+    }
+   ],
+   "expect": {
+    "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34": {
+     "row": true
+    },
+    "9599c0d31f6527e9779c0ae7242e48e1acfb12608cdc70fcedcd3824cf7be1b2": {
+     "row": true,
+     "reply": {
+      "root": "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+      "parent": "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34"
+     }
+    },
+    "e676bf2025047c553ae179daa104c7e43ffd2dfde26dac7d4a9a9e09c4427706": {
+     "row": true,
+     "reply": {
+      "root": "ce5d632016b579afae109cd44dd2349b6f7e835bea2cfafa84a3de734ffdad34",
+      "parent": "9599c0d31f6527e9779c0ae7242e48e1acfb12608cdc70fcedcd3824cf7be1b2"
+     },
+     "attention": "e676bf2025047c553ae179daa104c7e43ffd2dfde26dac7d4a9a9e09c4427706"
+    }
+   }
+  },
+  {
+   "name": "mention: a nostr:npub in content",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "2da67772b496afbe79f118b282105dfd9adf6fe7329dc0ee8dde84540f193913",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [
+       [
+        "p",
+        "b0b0000000000000000000000000000000000000000000000000000000000000"
+       ]
+      ],
+      "content": "thanks nostr:npub1kzcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0euyv8!"
+     }
+    }
+   ],
+   "expect": {
+    "2da67772b496afbe79f118b282105dfd9adf6fe7329dc0ee8dde84540f193913": {
+     "row": true,
+     "mentions": [
+      "b0b0000000000000000000000000000000000000000000000000000000000000"
+     ],
+     "attention": "2da67772b496afbe79f118b282105dfd9adf6fe7329dc0ee8dde84540f193913"
+    }
+   }
+  },
+  {
+   "name": "edit: newest of the author's edits wins",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "7d0de3bf9e1746055a1edeea70841385ea9fb56831c49ad433d8c9979be229f2",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "teh plan"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "ac69b3e6258fc53b5f87ccca66f36183e3bb28df8e6efca184c3609a6199bf9e",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7d0de3bf9e1746055a1edeea70841385ea9fb56831c49ad433d8c9979be229f2",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "the plan"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "3c778760e0ac2efc362867fe5fc030ad13f104130773a92296cc5f80856493e6",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7d0de3bf9e1746055a1edeea70841385ea9fb56831c49ad433d8c9979be229f2",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "p",
+        "ca20100000000000000000000000000000000000000000000000000000000000"
+       ]
+      ],
+      "content": "the plan, v2 with nostr:npub1egspqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqenzjfl"
+     }
+    }
+   ],
+   "expect": {
+    "7d0de3bf9e1746055a1edeea70841385ea9fb56831c49ad433d8c9979be229f2": {
+     "row": true,
+     "edit": "the plan, v2 with nostr:npub1egspqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqenzjfl"
+    },
+    "ac69b3e6258fc53b5f87ccca66f36183e3bb28df8e6efca184c3609a6199bf9e": {
+     "row": false
+    },
+    "3c778760e0ac2efc362867fe5fc030ad13f104130773a92296cc5f80856493e6": {
+     "row": false,
+     "mentions": [
+      "ca20100000000000000000000000000000000000000000000000000000000000"
+     ]
+    }
+   }
+  },
+  {
+   "name": "deletion by the author",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "aaa471bc2369b4bc2e7138bda5fa58decf400c07098591c8ab5a85af437db170",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "oops"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "109f7f7a21e2170f2aa537528bd645d56e41b48d464d82aa6b941392dc1743a8",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "aaa471bc2369b4bc2e7138bda5fa58decf400c07098591c8ab5a85af437db170",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "👍"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "cc915400a6c0355fcaea88c10036b55faa7403947902894eb313c6ebcb4c4283",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 5,
+      "tags": [
+       [
+        "e",
+        "aaa471bc2369b4bc2e7138bda5fa58decf400c07098591c8ab5a85af437db170",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": ""
+     }
+    }
+   ],
+   "expect": {
+    "aaa471bc2369b4bc2e7138bda5fa58decf400c07098591c8ab5a85af437db170": {
+     "row": true,
+     "deleted": true
+    },
+    "109f7f7a21e2170f2aa537528bd645d56e41b48d464d82aa6b941392dc1743a8": {
+     "row": false
+    },
+    "cc915400a6c0355fcaea88c10036b55faa7403947902894eb313c6ebcb4c4283": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "reactions, and one taken back",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "a11ce00000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "ship it?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "d7403185af6b829a264076866bb02261fed0ff64f4b73a085e35cc5db2d03c27",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "👍"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "20f2f5589e87cfd84e32638eea893f4c43fa5258b0d17c8fffddf53c3a7025c6",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "+"
+     }
+    },
+    {
+     "cursor": 4,
+     "at": 1767225840250,
+     "event": {
+      "id": "f5f5abbd7834d167dab8bbdec04dd17f4bbf9e4cf2b0f4703fb042a34662aa70",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225840,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "🎉"
+     }
+    },
+    {
+     "cursor": 5,
+     "at": 1767225900250,
+     "event": {
+      "id": "bda97b9a92332d61013d987879acb63552746bf930c9b849e18e3c27a6cb4474",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225900,
+      "kind": 5,
+      "tags": [
+       [
+        "e",
+        "f5f5abbd7834d167dab8bbdec04dd17f4bbf9e4cf2b0f4703fb042a34662aa70",
+        "",
+        "b0b0000000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "7"
+       ]
+      ],
+      "content": ""
+     }
+    }
+   ],
+   "expect": {
+    "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157": {
+     "row": true,
+     "reactions": {
+      "+": [
+       "ca20100000000000000000000000000000000000000000000000000000000000"
+      ],
+      "👍": [
+       "b0b0000000000000000000000000000000000000000000000000000000000000"
+      ]
+     }
+    },
+    "d7403185af6b829a264076866bb02261fed0ff64f4b73a085e35cc5db2d03c27": {
+     "row": false,
+     "attention": "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157"
+    },
+    "20f2f5589e87cfd84e32638eea893f4c43fa5258b0d17c8fffddf53c3a7025c6": {
+     "row": false,
+     "attention": "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157"
+    },
+    "f5f5abbd7834d167dab8bbdec04dd17f4bbf9e4cf2b0f4703fb042a34662aa70": {
+     "row": false,
+     "deleted": true,
+     "attention": "0f8ece7e330a62b6649a91d29637b7fa79fd9e89f4b3d7cdef3da65da8fa6157"
+    },
+    "bda97b9a92332d61013d987879acb63552746bf930c9b849e18e3c27a6cb4474": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "custom emoji reaction",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "new logo"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "cd2f01346b2c20d242ef14edf9e13db7690d00eeb87ef707439a6e635825d59a",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "emoji",
+        "catjam",
+        "https://cdn.example/catjam.gif"
+       ]
+      ],
+      "content": ":catjam:"
+     }
+    }
+   ],
+   "expect": {
+    "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9": {
+     "row": true,
+     "reactions": {
+      ":catjam:": [
+       "b0b0000000000000000000000000000000000000000000000000000000000000"
+      ]
+     },
+     "custom_emoji": {
+      ":catjam:": {
+       "name": "catjam",
+       "url": "https://cdn.example/catjam.gif"
+      }
+     }
+    },
+    "cd2f01346b2c20d242ef14edf9e13db7690d00eeb87ef707439a6e635825d59a": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "pin and unpin",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "f3f7cdbcc616cc72f59e2e585618bc054ef208c660a5858922bf9ea149b1e9e4",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "rules: be kind"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "331de6ea329c53ab46282ff8fa5f3f2925e61de824e4cdeb7018e0ae0e9b0079",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 9,
+      "tags": [],
+      "content": "wifi: hunter2"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "f689a885b99182075a9e71377da21dedb16b5c0bc33e9347e1e5225d8a510819",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1011,
+      "tags": [
+       [
+        "e",
+        "f3f7cdbcc616cc72f59e2e585618bc054ef208c660a5858922bf9ea149b1e9e4",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "op",
+        "add"
+       ]
+      ],
+      "content": ""
+     }
+    },
+    {
+     "cursor": 4,
+     "at": 1767225840250,
+     "event": {
+      "id": "80f2411b1a70971df5a33add90a5ebf80abe3a6aa0a0bbf3c35698c797301d8f",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225840,
+      "kind": 1011,
+      "tags": [
+       [
+        "e",
+        "331de6ea329c53ab46282ff8fa5f3f2925e61de824e4cdeb7018e0ae0e9b0079",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "op",
+        "add"
+       ]
+      ],
+      "content": ""
+     }
+    },
+    {
+     "cursor": 5,
+     "at": 1767225900250,
+     "event": {
+      "id": "17fa5e035c72bd42b970f62cb7784fed7e6c5090c110574f4befb74837a3a962",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225900,
+      "kind": 1011,
+      "tags": [
+       [
+        "e",
+        "331de6ea329c53ab46282ff8fa5f3f2925e61de824e4cdeb7018e0ae0e9b0079",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "op",
+        "remove"
+       ]
+      ],
+      "content": ""
+     }
+    }
+   ],
+   "expect": {
+    "f3f7cdbcc616cc72f59e2e585618bc054ef208c660a5858922bf9ea149b1e9e4": {
+     "row": true,
+     "pinned": true
+    },
+    "331de6ea329c53ab46282ff8fa5f3f2925e61de824e4cdeb7018e0ae0e9b0079": {
+     "row": true
+    },
+    "f689a885b99182075a9e71377da21dedb16b5c0bc33e9347e1e5225d8a510819": {
+     "row": false
+    },
+    "80f2411b1a70971df5a33add90a5ebf80abe3a6aa0a0bbf3c35698c797301d8f": {
+     "row": false
+    },
+    "17fa5e035c72bd42b970f62cb7784fed7e6c5090c110574f4befb74837a3a962": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "poll and votes",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "a11ce00000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 1068,
+      "tags": [
+       [
+        "option",
+        "0",
+        "Pizza"
+       ],
+       [
+        "option",
+        "1",
+        "Sushi"
+       ],
+       [
+        "polltype",
+        "singlechoice"
+       ],
+       [
+        "alt",
+        "Poll: Where to?"
+       ]
+      ],
+      "content": "Where to?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "c5f2c4ce21d7f53d6afa0343a4b722be0a4884817cbc891b92e6b16f341cbdbb",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "0"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Pizza"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "d4d52b4fe361a810c31a295778ebbb37416f9727478c6fef520b9f8ec3ec0fe2",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "1"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Sushi"
+     }
+    },
+    {
+     "cursor": 4,
+     "at": 1767225840250,
+     "event": {
+      "id": "d767e3dd28dd003ad1462e3542d49d8709034aa2975c83f32625ad75e8d0427e",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225840,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "1"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Sushi"
+     }
+    }
+   ],
+   "expect": {
+    "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8": {
+     "row": true,
+     "poll": {
+      "question": "Where to?",
+      "type": "singlechoice",
+      "open": true,
+      "options": [
+       {
+        "id": "0",
+        "label": "Pizza",
+        "votes": 0
+       },
+       {
+        "id": "1",
+        "label": "Sushi",
+        "votes": 2
+       }
+      ],
+      "participants": 2,
+      "selection": []
+     }
+    },
+    "c5f2c4ce21d7f53d6afa0343a4b722be0a4884817cbc891b92e6b16f341cbdbb": {
+     "row": false,
+     "attention": "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8"
+    },
+    "d4d52b4fe361a810c31a295778ebbb37416f9727478c6fef520b9f8ec3ec0fe2": {
+     "row": false,
+     "attention": "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8"
+    },
+    "d767e3dd28dd003ad1462e3542d49d8709034aa2975c83f32625ad75e8d0427e": {
+     "row": false,
+     "attention": "60355c24ac9e34b73aa3f4e90db1ad9ed4406dcc767fc858336ae36286ebc9d8"
+    }
+   }
+  },
+  {
+   "name": "multiple-choice poll with a deadline",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "3296e41130d5061cde2a965266cb32210a6c4fe36a19d4a769fd5fc75f4c590f",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 1068,
+      "tags": [
+       [
+        "option",
+        "0",
+        "Mon"
+       ],
+       [
+        "option",
+        "1",
+        "Tue"
+       ],
+       [
+        "option",
+        "2",
+        "Wed"
+       ],
+       [
+        "polltype",
+        "multiplechoice"
+       ],
+       [
+        "endsAt",
+        "1767232800"
+       ],
+       [
+        "alt",
+        "Poll: Which days?"
+       ]
+      ],
+      "content": "Which days?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "b47a915046a634e5660a970194fee9c387ebeaa3ce4081e52ffa069e46004739",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "3296e41130d5061cde2a965266cb32210a6c4fe36a19d4a769fd5fc75f4c590f",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "0"
+       ],
+       [
+        "response",
+        "2"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Mon, Wed"
+     }
+    }
+   ],
+   "expect": {
+    "3296e41130d5061cde2a965266cb32210a6c4fe36a19d4a769fd5fc75f4c590f": {
+     "row": true,
+     "poll": {
+      "question": "Which days?",
+      "type": "multiplechoice",
+      "ends_at": 1767232800,
+      "open": true,
+      "options": [
+       {
+        "id": "0",
+        "label": "Mon",
+        "votes": 1
+       },
+       {
+        "id": "1",
+        "label": "Tue",
+        "votes": 0
+       },
+       {
+        "id": "2",
+        "label": "Wed",
+        "votes": 1
+       }
+      ],
+      "participants": 1,
+      "selection": [
+       "0",
+       "2"
+      ]
+     }
+    },
+    "b47a915046a634e5660a970194fee9c387ebeaa3ce4081e52ffa069e46004739": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "media: an image and a voice note",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "0cffa04f5f66753d13fba7bd07fcc7038309fb1c4d707328345e5ceadfef22c4",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [
+       [
+        "imeta",
+        "url https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "m image/jpeg",
+        "filename sunset.jpg",
+        "x 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 1200x800",
+        "blurhash LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
+        "thumbhash 1QcSHQRnh493V4dIh4eXh1h4kJUI",
+        "alt a sunset over the bay"
+       ]
+      ],
+      "content": "look"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "460e79c116dfd492dbcc1db6b60c850544d5655bed50cf8289a5b502f1b315c0",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 9,
+      "tags": [
+       [
+        "imeta",
+        "url https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+        "m audio/mp4",
+        "filename voice.m4a",
+        "x 7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+        "n 1d1d1d1d1d1d1d1d1d1d1d1d",
+        "v cordn-em-v1",
+        "duration 4200",
+        "waveform 0.100,0.500,1.000,0.250"
+       ]
+      ],
+      "content": ""
+     }
+    }
+   ],
+   "expect": {
+    "0cffa04f5f66753d13fba7bd07fcc7038309fb1c4d707328345e5ceadfef22c4": {
+     "row": true,
+     "media": {
+      "url": "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "mime": "image/jpeg",
+      "filename": "sunset.jpg",
+      "x": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "n": "0c0c0c0c0c0c0c0c0c0c0c0c",
+      "dim": "1200x800",
+      "blurhash": "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
+      "thumbhash": "1QcSHQRnh493V4dIh4eXh1h4kJUI",
+      "alt": "a sunset over the bay"
+     }
+    },
+    "460e79c116dfd492dbcc1db6b60c850544d5655bed50cf8289a5b502f1b315c0": {
+     "row": true,
+     "media": {
+      "url": "https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+      "mime": "audio/mp4",
+      "filename": "voice.m4a",
+      "x": "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+      "n": "1d1d1d1d1d1d1d1d1d1d1d1d",
+      "duration_ms": 4200,
+      "waveform": [
+       0.1,
+       0.5,
+       1,
+       0.25
+      ]
+     }
+    }
+   }
+  }
+ ]
+}

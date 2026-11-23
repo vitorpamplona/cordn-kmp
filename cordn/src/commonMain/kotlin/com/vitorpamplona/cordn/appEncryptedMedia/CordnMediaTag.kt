@@ -23,6 +23,7 @@ package com.vitorpamplona.cordn.appEncryptedMedia
 import com.vitorpamplona.quartz.nip01Core.core.TagArray
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.core.toHexKey
+import kotlin.math.round
 
 /**
  * How a cordn message points at an encrypted file.
@@ -69,13 +70,11 @@ object CordnMediaTag {
     const val ALT = "alt"
 
     /**
-     * Amplitudes for the voice-note bars, space-separated floats.
-     *
-     * On `MediaRecorder.maxAmplitude`'s own scale (0..32767), which is what the
-     * rest of the app already puts on the wire for kind-1222 voice notes — see
-     * `VoiceAnonymizer`, which multiplies back up by 32768 to match. The
-     * renderer normalises whatever range it is given, so the absolute scale
-     * only has to be consistent with the app's other waveforms, and is.
+     * Peaks for the voice-note bars: cordn-web's format, comma-separated amplitudes from 0 to 1
+     * with three decimals (`waveform 0.100,0.500,1.000`). cordn-web drops any value outside 0..1,
+     * so the space-separated 0..32767 amplitudes this library wrote up to 1.5.0 gave its readers
+     * no bars, and its peaks gave ours none. [build] now writes the reference format; [parseAll]
+     * reads both, the old one scaled down to 0..1.
      *
      * NOT in `spec/applications/encrypted-media.md` §5, which lists no such
      * field. It is written as one more of the display hints the spec does
@@ -92,6 +91,12 @@ object CordnMediaTag {
      */
     const val WAVEFORM = "waveform"
 
+    /**
+     * A voice note's length in milliseconds, cordn-web's `duration` hint. Like the waveform, a
+     * display hint outside the AAD: a player shows it until the audio's own metadata loads.
+     */
+    const val DURATION = "duration"
+
     /** Builds the `imeta` tag for an uploaded [media] at [url]. */
     fun build(
         media: CordnEncryptedMedia,
@@ -101,6 +106,7 @@ object CordnMediaTag {
         thumbhash: String? = null,
         alt: String? = null,
         waveform: List<Float>? = null,
+        durationMs: Long? = null,
     ): Array<String> =
         buildList {
             add(TAG_NAME)
@@ -115,8 +121,20 @@ object CordnMediaTag {
             thumbhash?.let { add("$THUMBHASH $it") }
             // A newline in alt would split the tag field, so it is flattened.
             alt?.takeIf { it.isNotBlank() }?.let { add("$ALT ${it.replace('\n', ' ')}") }
-            waveform?.takeIf { it.isNotEmpty() }?.let { add("$WAVEFORM ${it.joinToString(" ")}") }
+            durationMs?.takeIf { it > 0 }?.let { add("$DURATION $it") }
+            waveform?.takeIf { it.isNotEmpty() }?.let { add("$WAVEFORM ${peaks(it).joinToString(",") { peak -> threeDecimals(peak) }}") }
         }.toTypedArray()
+
+    @Deprecated("Kept so code compiled against 1.5.0 still links.", level = DeprecationLevel.HIDDEN)
+    fun build(
+        media: CordnEncryptedMedia,
+        url: String,
+        dimensions: String?,
+        blurhash: String?,
+        thumbhash: String?,
+        alt: String?,
+        waveform: List<Float>?,
+    ): Array<String> = build(media, url, dimensions, blurhash, thumbhash, alt, waveform, null)
 
     /**
      * Reads every attachment in [tags], skipping any that is not usable.
@@ -160,13 +178,40 @@ object CordnMediaTag {
                 alt = fields[ALT],
                 // A malformed number makes the whole hint useless rather than
                 // the message: drop the bars, keep the attachment.
-                waveform =
-                    fields[WAVEFORM]
-                        ?.split(' ')
-                        ?.mapNotNull { it.toFloatOrNull() }
-                        ?.takeIf { it.isNotEmpty() },
+                waveform = fields[WAVEFORM]?.let(::parseWaveform),
+                durationMs = fields[DURATION]?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0 },
             )
         }
+
+    /** The recorder's scale, `MediaRecorder.maxAmplitude`'s 0..32767. */
+    private const val MAX_AMPLITUDE = 32767f
+
+    /**
+     * [values] as 0..1 peaks. Values above 1 are amplitudes on the recorder's 0..32767 scale,
+     * which callers written for 1.5.0 pass, and are scaled down.
+     */
+    private fun peaks(values: List<Float>): List<Float> {
+        val scale = if (values.any { it > 1f }) MAX_AMPLITUDE else 1f
+        return values.map { (it / scale).coerceIn(0f, 1f) }
+    }
+
+    /** `Number.prototype.toFixed(3)` for a value in 0..1. */
+    private fun threeDecimals(value: Float): String {
+        val thousandths = round(value * 1000f).toInt()
+        return "${thousandths / 1000}.${(thousandths % 1000).toString().padStart(3, '0')}"
+    }
+
+    /**
+     * cordn-web's `parseWaveform` (comma-separated, finite, 0..1), or the space-separated
+     * amplitudes of 1.5.0 and earlier, scaled to 0..1. A malformed value is dropped, never the
+     * attachment.
+     */
+    private fun parseWaveform(raw: String): List<Float>? {
+        val legacy = !raw.contains(',') && raw.trim().contains(' ')
+        val values = raw.split(if (legacy) ' ' else ',').mapNotNull { it.trim().toFloatOrNull()?.takeIf { value -> value.isFinite() } }
+        val peaks = if (legacy) peaks(values.filter { it >= 0f }) else values.filter { it in 0f..1f }
+        return peaks.takeIf { it.isNotEmpty() }
+    }
 
     private const val HASH_HEX_LENGTH = 64
     private const val NONCE_HEX_LENGTH = 24
@@ -184,7 +229,23 @@ data class CordnMediaAttachment(
     val thumbhash: String? = null,
     val alt: String? = null,
     val waveform: List<Float>? = null,
+    /** A voice note's length, in milliseconds ([CordnMediaTag.DURATION]). */
+    val durationMs: Double? = null,
 ) {
+    @Deprecated("Kept so code compiled against 1.5.0 still links.", level = DeprecationLevel.HIDDEN)
+    constructor(
+        url: String,
+        mimeType: String,
+        filename: String,
+        plaintextHash: String,
+        nonce: String,
+        dimensions: String?,
+        blurhash: String?,
+        thumbhash: String?,
+        alt: String?,
+        waveform: List<Float>?,
+    ) : this(url, mimeType, filename, plaintextHash, nonce, dimensions, blurhash, thumbhash, alt, waveform, null)
+
     val hashBytes: ByteArray get() = plaintextHash.hexToByteArray()
     val nonceBytes: ByteArray get() = nonce.hexToByteArray()
 

@@ -4,6 +4,14 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "@cordn/core": "0.5.5"
+    "@cordn/core": "0.5.5",
+    "@noble/ciphers": "2.2.0",
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.0.1",
+    "applesauce-common": "6.0.2",
+    "applesauce-core": "6.2.0",
+    "clsx": "2.1.1",
+    "nostr-tools": "2.23.9",
+    "tailwind-merge": "3.6.0"
   }
 }
