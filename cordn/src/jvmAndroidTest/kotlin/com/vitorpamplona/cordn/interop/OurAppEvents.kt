@@ -22,6 +22,7 @@ package com.vitorpamplona.cordn.interop
 
 import com.vitorpamplona.cordn.appEncryptedMedia.CordnEncryptedMedia
 import com.vitorpamplona.cordn.appEncryptedMedia.CordnMediaTag
+import com.vitorpamplona.cordn.spec02Envelopes.CordnCalendar
 import com.vitorpamplona.cordn.spec02Envelopes.CordnCustomEmoji
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
@@ -68,19 +69,23 @@ object OurAppEvents {
             pubKey: HexKey,
             outbound: CordnMessageReferences.Outbound,
             createdAt: Long? = null,
-        ): CordnEnvelope = send(pubKey, outbound.kind, outbound.tags, outbound.content, createdAt)
+            receivedAt: Long? = null,
+        ): CordnEnvelope = send(pubKey, outbound.kind, outbound.tags, outbound.content, createdAt, receivedAt)
 
+        /** [receivedAt] is the coordinator's `at` (ms); by default a moment after the cursor's minute. */
         fun send(
             pubKey: HexKey,
             kind: Int,
             tags: Array<Array<String>>,
             content: String,
             createdAt: Long? = null,
+            receivedAt: Long? = null,
         ): CordnEnvelope {
             val cursor = messages.size + 1L
             val envelope = CordnEnvelope.build(pubKey, createdAt ?: (T0 + cursor * 60), kind, tags, content)
-            messages += CordnDeliveredMessage(envelope, cursor)
-            at[cursor] = (T0 + cursor * 60) * 1000 + 250
+            val received = receivedAt ?: ((T0 + cursor * 60) * 1000 + 250)
+            messages += CordnDeliveredMessage(envelope, cursor, receivedAt = received)
+            at[cursor] = received
             return envelope
         }
     }
@@ -146,6 +151,14 @@ object OurAppEvents {
                     ),
                 )
             },
+            case("custom emoji reaction: encrypted emoji-media", BOB) {
+                val a = send(ALICE, text("new logo"))
+                val picture = CordnMediaTag.build(media("image/png", "party.png"), url = "https://blossom.example/$HASH")
+                send(
+                    BOB,
+                    CordnMessageReferences.outbound(":party:", reactionTo = t(a), extraTags = arrayOf(CordnCustomEmoji.mediaTag("party", picture))),
+                )
+            },
             case("pin and unpin", BOB) {
                 val a = send(ALICE, text("rules: be kind"))
                 val b = send(ALICE, text("wifi: hunter2"))
@@ -169,6 +182,49 @@ object OurAppEvents {
                         "Which days?",
                     )
                 send(BOB, CordnMessageKinds.POLL_RESPONSE, CordnPolls.voteTags(t(poll), listOf("0", "2")), "Voted: Mon, Wed")
+            },
+            case("poll: a vote received after the deadline, backdated by its sender", BOB) {
+                val poll = send(ALICE, CordnMessageKinds.POLL, CordnPolls.pollTags("Lunch?", listOf("Yes", "No"), endsAt = T0 + 1_800), "Lunch?")
+                send(BOB, CordnMessageKinds.POLL_RESPONSE, CordnPolls.voteTags(t(poll), listOf("0")), "Voted: Yes", createdAt = T0 + 1_700, receivedAt = (T0 + 1_700) * 1000)
+                send(CAROL, CordnMessageKinds.POLL_RESPONSE, CordnPolls.voteTags(t(poll), listOf("1")), "Voted: No", createdAt = T0 + 1_750, receivedAt = (T0 + 1_801) * 1000)
+            },
+            case("edit: two edits the coordinator received in the same millisecond", BOB) {
+                val original = send(ALICE, text("draft"))
+                val at = (T0 + 600) * 1000 + 7
+                send(ALICE, CordnMessageReferences.outbound("first fix", editTo = t(original)), receivedAt = at)
+                send(ALICE, CordnMessageReferences.outbound("second fix", editTo = t(original)), receivedAt = at)
+            },
+            case("calendar: RSVPs from our builder", BOB) {
+                val event =
+                    send(
+                        ALICE,
+                        CordnMessageKinds.CALENDAR_TIME,
+                        arrayOf(arrayOf("d", "standup"), arrayOf("title", "Standup"), arrayOf("start", (T0 + 86_400).toString()), arrayOf("end", (T0 + 88_200).toString())),
+                        "",
+                    )
+
+                fun rsvp(
+                    who: HexKey,
+                    status: CordnCalendar.RsvpStatus,
+                ) = send(who, CordnMessageKinds.CALENDAR_RSVP, CordnCalendar.rsvpTags(event, status), CordnCalendar.rsvpLabel(status))
+                rsvp(BOB, CordnCalendar.RsvpStatus.ACCEPTED)
+                rsvp(CAROL, CordnCalendar.RsvpStatus.TENTATIVE)
+                // Changed their mind: the newest RSVP per account counts.
+                rsvp(BOB, CordnCalendar.RsvpStatus.DECLINED)
+            },
+            case("media: two attachments in one message", BOB) {
+                send(
+                    ALICE,
+                    CordnMessageReferences.outbound(
+                        "two photos",
+                        extraTags =
+                            arrayOf(1, 2)
+                                .map { n ->
+                                    val hash = n.toString().repeat(64)
+                                    CordnMediaTag.build(media("image/jpeg", "photo-$n.jpg", hash = hash), url = "https://blossom.example/$hash", dimensions = "800x600")
+                                }.toTypedArray(),
+                    ),
+                )
             },
             case("media: an image and a voice note", BOB) {
                 send(

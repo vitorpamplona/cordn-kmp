@@ -584,6 +584,82 @@
    }
   },
   {
+   "name": "custom emoji reaction: encrypted emoji-media",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "new logo"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "70468f80753267df29b7079c75692a5f837de97356ee2c8ea5985ac1cc7c29a0",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 7,
+      "tags": [
+       [
+        "e",
+        "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ],
+       [
+        "emoji-media",
+        "name party",
+        "url https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "m image/png",
+        "filename party.png",
+        "x 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1"
+       ]
+      ],
+      "content": ":party:"
+     }
+    }
+   ],
+   "expect": {
+    "96b433d34c6b012ea7510d0df60652fb821ba22492184df65a0d6220aab521f9": {
+     "row": true,
+     "reactions": {
+      ":party:": [
+       "b0b0000000000000000000000000000000000000000000000000000000000000"
+      ]
+     },
+     "custom_emoji": {
+      ":party:": {
+       "name": "party",
+       "media_url": "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      }
+     }
+    },
+    "70468f80753267df29b7079c75692a5f837de97356ee2c8ea5985ac1cc7c29a0": {
+     "row": false
+    }
+   }
+  },
+  {
    "name": "pin and unpin",
    "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
    "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
@@ -1030,6 +1106,475 @@
    }
   },
   {
+   "name": "poll: a vote received after the deadline, backdated by its sender",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 1068,
+      "tags": [
+       [
+        "option",
+        "0",
+        "Yes"
+       ],
+       [
+        "option",
+        "1",
+        "No"
+       ],
+       [
+        "polltype",
+        "singlechoice"
+       ],
+       [
+        "endsAt",
+        "1767227400"
+       ],
+       [
+        "alt",
+        "Poll: Lunch?"
+       ]
+      ],
+      "content": "Lunch?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767227300000,
+     "event": {
+      "id": "1d465f74b9e75ae903b26e49a087fded67f17d8d26e2033d69f607770222c905",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767227300,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "0"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Yes"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767227401000,
+     "event": {
+      "id": "00854b7131de352909cc4364271a7e78bce81fdb604568d3906ceaaf974d9ad5",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767227350,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "1"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: No"
+     }
+    }
+   ],
+   "expect": {
+    "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4": {
+     "row": true,
+     "poll": {
+      "question": "Lunch?",
+      "type": "singlechoice",
+      "ends_at": 1767227400,
+      "open": false,
+      "options": [
+       {
+        "id": "0",
+        "label": "Yes",
+        "votes": 1
+       },
+       {
+        "id": "1",
+        "label": "No",
+        "votes": 0
+       }
+      ],
+      "participants": 1,
+      "selection": [
+       "0"
+      ]
+     }
+    },
+    "1d465f74b9e75ae903b26e49a087fded67f17d8d26e2033d69f607770222c905": {
+     "row": false
+    },
+    "00854b7131de352909cc4364271a7e78bce81fdb604568d3906ceaaf974d9ad5": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "edit: two edits the coordinator received in the same millisecond",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "draft"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767226200007,
+     "event": {
+      "id": "73b2b48628effae6b513d094f4ed6f61448be0c27c1d0d8b94ccac5baa44efd0",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "first fix"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767226200007,
+     "event": {
+      "id": "393754c53cb3d5867e8b72da3fea9e948fb17ba221c2a5fed42c23a3fa6bb46a",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "second fix"
+     }
+    }
+   ],
+   "expect": {
+    "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787": {
+     "row": true,
+     "edit": "first fix"
+    },
+    "73b2b48628effae6b513d094f4ed6f61448be0c27c1d0d8b94ccac5baa44efd0": {
+     "row": false
+    },
+    "393754c53cb3d5867e8b72da3fea9e948fb17ba221c2a5fed42c23a3fa6bb46a": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "calendar: RSVPs from our builder",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "5fef71190e4ccb32a65a2944669852b08644936cd24fdfaaa4c9778932dd5dbd",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 31923,
+      "tags": [
+       [
+        "d",
+        "standup"
+       ],
+       [
+        "title",
+        "Standup"
+       ],
+       [
+        "start",
+        "1767312000"
+       ],
+       [
+        "end",
+        "1767313800"
+       ]
+      ],
+      "content": ""
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767225720250,
+     "event": {
+      "id": "886f26a93c7bbd6c8ce115c25c14142c91444dfd66f1b1839dab7c3ef68ceeaf",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 31925,
+      "tags": [
+       [
+        "a",
+        "31923:a11ce00000000000000000000000000000000000000000000000000000000000:standup"
+       ],
+       [
+        "e",
+        "5fef71190e4ccb32a65a2944669852b08644936cd24fdfaaa4c9778932dd5dbd",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "d",
+        "rsvp-standup"
+       ],
+       [
+        "status",
+        "accepted"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "alt",
+        "RSVP: Going"
+       ]
+      ],
+      "content": "Going"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767225780250,
+     "event": {
+      "id": "52887b665bc41e7dc6499b2ad59eb391920fea49429f45a1d79abc4cbde8d2ea",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 31925,
+      "tags": [
+       [
+        "a",
+        "31923:a11ce00000000000000000000000000000000000000000000000000000000000:standup"
+       ],
+       [
+        "e",
+        "5fef71190e4ccb32a65a2944669852b08644936cd24fdfaaa4c9778932dd5dbd",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "d",
+        "rsvp-standup"
+       ],
+       [
+        "status",
+        "tentative"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "alt",
+        "RSVP: Maybe"
+       ]
+      ],
+      "content": "Maybe"
+     }
+    },
+    {
+     "cursor": 4,
+     "at": 1767225840250,
+     "event": {
+      "id": "eef5f6b88176b7a92d0caa91007c793f382b8471ed8da06afd2e1577a1d53830",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225840,
+      "kind": 31925,
+      "tags": [
+       [
+        "a",
+        "31923:a11ce00000000000000000000000000000000000000000000000000000000000:standup"
+       ],
+       [
+        "e",
+        "5fef71190e4ccb32a65a2944669852b08644936cd24fdfaaa4c9778932dd5dbd",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "d",
+        "rsvp-standup"
+       ],
+       [
+        "status",
+        "declined"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "alt",
+        "RSVP: Can't go"
+       ]
+      ],
+      "content": "Can't go"
+     }
+    }
+   ],
+   "expect": {
+    "5fef71190e4ccb32a65a2944669852b08644936cd24fdfaaa4c9778932dd5dbd": {
+     "row": true,
+     "calendar": {
+      "title": "Standup",
+      "revised": false,
+      "cancelled": false,
+      "going": [],
+      "maybe": [
+       "ca20100000000000000000000000000000000000000000000000000000000000"
+      ],
+      "declined": [
+       "b0b0000000000000000000000000000000000000000000000000000000000000"
+      ]
+     }
+    },
+    "886f26a93c7bbd6c8ce115c25c14142c91444dfd66f1b1839dab7c3ef68ceeaf": {
+     "row": false
+    },
+    "52887b665bc41e7dc6499b2ad59eb391920fea49429f45a1d79abc4cbde8d2ea": {
+     "row": false
+    },
+    "eef5f6b88176b7a92d0caa91007c793f382b8471ed8da06afd2e1577a1d53830": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "media: two attachments in one message",
+   "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "8430c363cb53c5f9d0ff9bcb7edeba7e97ceea1bf36925399a9087dbe3001f4c",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [
+       [
+        "imeta",
+        "url https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111",
+        "m image/jpeg",
+        "filename photo-1.jpg",
+        "x 1111111111111111111111111111111111111111111111111111111111111111",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 800x600"
+       ],
+       [
+        "imeta",
+        "url https://blossom.example/2222222222222222222222222222222222222222222222222222222222222222",
+        "m image/jpeg",
+        "filename photo-2.jpg",
+        "x 2222222222222222222222222222222222222222222222222222222222222222",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 800x600"
+       ]
+      ],
+      "content": "two photos"
+     }
+    }
+   ],
+   "expect": {
+    "8430c363cb53c5f9d0ff9bcb7edeba7e97ceea1bf36925399a9087dbe3001f4c": {
+     "row": true,
+     "attachments": [
+      "https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111"
+     ],
+     "media": {
+      "url": "https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111",
+      "mime": "image/jpeg",
+      "filename": "photo-1.jpg",
+      "x": "1111111111111111111111111111111111111111111111111111111111111111",
+      "n": "0c0c0c0c0c0c0c0c0c0c0c0c",
+      "dim": "800x600"
+     }
+    }
+   }
+  },
+  {
    "name": "media: an image and a voice note",
    "source": "cordn-kmp builders (CordnMessageReferences, CordnMediaTag, CordnPolls, CordnCustomEmoji)",
    "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
@@ -1089,6 +1634,9 @@
    "expect": {
     "0cffa04f5f66753d13fba7bd07fcc7038309fb1c4d707328345e5ceadfef22c4": {
      "row": true,
+     "attachments": [
+      "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+     ],
      "media": {
       "url": "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
       "mime": "image/jpeg",
@@ -1103,6 +1651,9 @@
     },
     "460e79c116dfd492dbcc1db6b60c850544d5655bed50cf8289a5b502f1b315c0": {
      "row": true,
+     "attachments": [
+      "https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b"
+     ],
      "media": {
       "url": "https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
       "mime": "audio/mp4",

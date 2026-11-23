@@ -211,9 +211,15 @@ Plan §8 has the full analysis.
    cordn-web shows it. A removed member still holds the epoch they were removed
    from and could keep posting into the group until four Commits later; the
    retained epochs are for lagging senders, not departed ones.
-8. **A poll's deadline is judged by the vote's `created_at`.** cordn-web uses the
-   coordinator's receive time, which `CordnDeliveredMessage` does not keep, so a vote whose
-   sender backdated it past a closed poll counts here and not there (`CordnPolls`).
+8. **Two small app-event departures from cordn-web.** A message may carry several `imeta`
+   tags (NIP-92): cordn-web sends one file per message and draws only the first `imeta` of a
+   message that has more, showing "unsupported" when that first one has an unknown version;
+   `CordnMediaTag.parseAll` returns every attachment §4 accepts and Amethyst draws them all. And
+   two edits the coordinator received in the same millisecond: cordn-web compares `at` strictly
+   and keeps the first, where its own pins and votes break the tie on the cursor;
+   `CordnAnnotationIndex` keeps the edit sequenced last. Both are pinned by the app-event vectors.
+   (A poll's deadline used to be a third: it is now judged by the coordinator's receive time,
+   `CordnDeliveredMessage.receivedAt`, as cordn-web judges it.)
 9. **Unknown kinds.** cordn-web draws every message of a kind it does not know as a row, each
    revision of an addressable one and an empty one included; `CordnStreamRows` keeps NIP-01's
    newest revision and drops a blank row with no `alt`. `spec/02.md` §6 requires no kinds.
