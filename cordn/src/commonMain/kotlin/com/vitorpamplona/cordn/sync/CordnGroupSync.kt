@@ -124,6 +124,7 @@ class CordnGroupSync(
         onMessage: (String, Ingestion) -> Unit,
     ): Drained {
         require(gids.isNotEmpty()) { "catchUp needs at least one group" }
+        val requested = gids.toSet()
         var delivered = 0
 
         repeat(maxPages) {
@@ -133,7 +134,9 @@ class CordnGroupSync(
             // coordinator does not say how much is left.
             if (page.isEmpty()) return Drained(delivered, current = true)
 
-            page.forEach { message -> guard(message.gid) { if (deliver(message, onMessage)) delivered++ } }
+            // Only the groups asked for: a page naming any other gid is the coordinator's error
+            // or its attack, and taking it would grow an inbox (and a lock) per name it invents.
+            page.forEach { message -> if (message.gid in requested) guard(message.gid) { if (deliver(message, onMessage)) delivered++ } }
 
             // A page that moved no cursor means the coordinator is serving the
             // same records back. Stopping beats looping: the alternative is a
@@ -158,11 +161,12 @@ class CordnGroupSync(
         onMessage: (String, Ingestion) -> Unit,
     ) {
         require(gids.isNotEmpty()) { "subscribe needs at least one group" }
+        val requested = gids.toSet()
         client.subscribeMessages(
             cursors = gids.associateWith { inbox(it).cursor.afterOrNull() },
             timeoutMs = timeoutMs,
         ) { message ->
-            deliver(message, onMessage)
+            if (message.gid in requested) deliver(message, onMessage)
         }
     }
 
@@ -181,6 +185,7 @@ class CordnGroupSync(
         onMessage: (String, Ingestion) -> Unit,
     ) {
         require(gids.isNotEmpty()) { "subscribe needs at least one group" }
+        val requested = gids.toSet()
         coroutineScope {
             val queue = Channel<GroupMessage>(Channel.UNLIMITED)
             val worker =
@@ -191,7 +196,7 @@ class CordnGroupSync(
                 client.subscribeMessages(
                     cursors = gids.associateWith { inbox(it).cursor.afterOrNull() },
                     timeoutMs = timeoutMs,
-                ) { message -> queue.trySend(message) }
+                ) { message -> if (message.gid in requested) queue.trySend(message) }
             } catch (e: Throwable) {
                 worker.cancel()
                 throw e
