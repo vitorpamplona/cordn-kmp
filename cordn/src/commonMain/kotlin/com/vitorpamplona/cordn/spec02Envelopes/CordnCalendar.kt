@@ -242,6 +242,8 @@ object CordnCalendar {
         val revisionCount = mutableMapOf<String, Int>()
         val cancellations = mutableMapOf<String, Long>()
         val invalid = mutableSetOf<HexKey>()
+        // Every valid calendar revision, latest or not.
+        val revisions = mutableListOf<HexKey>()
         // coordinate → account → its newest RSVP
         val rsvps = mutableMapOf<String, MutableMap<HexKey, Pair<CordnDeliveredMessage, RsvpStatus>>>()
 
@@ -265,21 +267,21 @@ object CordnCalendar {
                 return@forEach
             }
 
+            if (!CordnMessageKinds.isCalendarEvent(message.envelope.kind)) return@forEach
             val coordinate = coordinateOf(message)
             if (coordinate == null) {
-                if (CordnMessageKinds.isCalendarEvent(message.envelope.kind)) invalid += message.envelope.id
+                invalid += message.envelope.id
                 return@forEach
             }
+            revisions += message.envelope.id
             revisionCount[coordinate] = (revisionCount[coordinate] ?: 0) + 1
             val current = latest[coordinate]
             if (current == null || isNewer(message, current)) latest[coordinate] = message
         }
 
         val current = latest.values.mapTo(mutableSetOf()) { it.envelope.id }
-        val superseded =
-            messages
-                .filter { message -> coordinateOf(message) != null && message.envelope.id !in current }
-                .mapTo(mutableSetOf()) { it.envelope.id }
+        // From the first pass: re-running coordinateOf here validated every event twice.
+        val superseded = revisions.filterTo(mutableSetOf()) { it !in current }
         val revised = latest.filterKeys { (revisionCount[it] ?: 0) > 1 }.values.mapTo(mutableSetOf()) { it.envelope.id }
         val cancelled =
             latest

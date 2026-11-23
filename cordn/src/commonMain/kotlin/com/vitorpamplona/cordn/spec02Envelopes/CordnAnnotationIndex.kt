@@ -136,7 +136,16 @@ class CordnAnnotationIndex private constructor(
      * lacked, as cordn-web's annotation index picks it.
      */
     val reactionEmoji: Map<HexKey, Map<String, CordnCustomEmoji>> = emptyMap(),
+    /** Every poll in the stream with the vote that counts per voter, folded once ([CordnPolls.votes]). */
+    val polls: CordnPolls.Votes = CordnPolls.votes(emptyList()),
 ) {
+    /** [pollId]'s tally as [viewer] sees it at [nowSeconds] (see [CordnPolls.tally]), from the one fold. */
+    fun tallyOf(
+        pollId: HexKey,
+        viewer: HexKey,
+        nowSeconds: Long,
+    ): CordnPolls.Tally? = polls.tally(pollId, viewer, nowSeconds)
+
     /** Who pinned a message and when, kept so a pin list can be ordered. */
     data class PinState(
         val targetId: HexKey,
@@ -296,6 +305,7 @@ class CordnAnnotationIndex private constructor(
                 cancelledEvents = calendar.cancelled,
                 unsupportedEvents = calendar.invalid,
                 reactionEmoji = reactionEmoji,
+                polls = CordnPolls.votes(messages),
             )
         }
     }

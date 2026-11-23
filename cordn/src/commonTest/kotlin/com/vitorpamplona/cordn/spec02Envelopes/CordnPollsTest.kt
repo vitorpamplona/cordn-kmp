@@ -96,4 +96,45 @@ class CordnPollsTest {
             )
         assertEquals(listOf(1, 0), assertNotNull(CordnPolls.tally(stream, poll.id, alice, nowSeconds = endsAt)).options.map { it.votes })
     }
+
+    @Test
+    fun oneFoldAnswersEveryPollAsTheSingleTallyDoes() {
+        val second =
+            CordnEnvelope.build(
+                pubKey = bob,
+                createdAt = endsAt - 1_000,
+                kind = CordnMessageKinds.POLL,
+                tags = CordnPolls.pollTags("Where?", listOf("Here", "There", "Anywhere"), type = CordnPolls.Type.MULTIPLE),
+                content = "Where?",
+            )
+
+        fun on(
+            target: CordnEnvelope,
+            voter: HexKey,
+            options: List<String>,
+            createdAt: Long,
+        ) = CordnEnvelope.build(voter, createdAt, CordnMessageKinds.POLL_RESPONSE, CordnPolls.voteTags(CordnMessageReferences.Target.of(target), options), "Voted")
+
+        val stream =
+            listOf(
+                CordnDeliveredMessage(poll, 1, receivedAt = (endsAt - 1_800) * 1000),
+                CordnDeliveredMessage(second, 2, receivedAt = (endsAt - 1_000) * 1000),
+                CordnDeliveredMessage(on(poll, bob, listOf("0"), endsAt - 900), 3, receivedAt = (endsAt - 900) * 1000),
+                CordnDeliveredMessage(on(second, alice, listOf("0", "2"), endsAt - 800), 4, receivedAt = (endsAt - 800) * 1000),
+                // Bob changes his mind, then casts an invalid vote that must not replace it.
+                CordnDeliveredMessage(on(poll, bob, listOf("1"), endsAt - 700), 5, receivedAt = (endsAt - 700) * 1000),
+                CordnDeliveredMessage(on(poll, bob, listOf("0", "1"), endsAt - 600), 6, receivedAt = (endsAt - 600) * 1000),
+                CordnDeliveredMessage(on(second, carol, listOf("1"), endsAt - 500), 7, receivedAt = (endsAt - 500) * 1000),
+            )
+
+        val index = CordnAnnotationIndex.of(stream)
+        listOf(poll.id, second.id).forEach { id ->
+            listOf(alice, bob, carol).forEach { viewer ->
+                assertEquals(CordnPolls.tally(stream, id, viewer, endsAt), index.tallyOf(id, viewer, endsAt))
+            }
+        }
+        assertEquals(listOf(0, 1), index.tallyOf(poll.id, bob, endsAt)!!.options.map { it.votes })
+        assertEquals(listOf(1, 1, 1), index.tallyOf(second.id, alice, endsAt)!!.options.map { it.votes })
+        assertEquals(null, index.tallyOf("ee".repeat(32), alice, endsAt))
+    }
 }
