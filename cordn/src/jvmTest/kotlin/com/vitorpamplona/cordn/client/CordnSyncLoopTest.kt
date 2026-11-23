@@ -33,6 +33,7 @@ import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 /**
  * The loop that keeps one coordinator's groups current.
@@ -79,6 +80,9 @@ class CordnSyncLoopTest {
          */
         var subscribeSpendsBudgetTimes = 0
 
+        /** Subscribes that return at once without an error, like a coordinator closing every stream on arrival. */
+        var subscribeReturnsAtOnce = false
+
         /** Handed to onDelivery once per catchUp, to prove the wiring. */
         var deliverOnCatchUp: CordnGroupManager.Delivery? = null
 
@@ -120,6 +124,8 @@ class CordnSyncLoopTest {
                 subscribeSpendsBudgetTimes--
                 withTimeout(1) { delay(1_000) }
             }
+            // Bounded, so a loop that spins on these parks instead of hanging the test.
+            if (subscribeReturnsAtOnce && subscribes < 100) return
             val opened = closeStream.value
             closeStream.first { it != opened }
         }
@@ -238,6 +244,8 @@ class CordnSyncLoopTest {
             // the cap rather than the floor.
             source.failCatchUpTimes = 1
             source.closeOpenStream()
+            // The next pass starts after the minimum spacing between passes.
+            advanceTimeBy(1_001)
             runCurrent()
 
             val after = loop.state.value
@@ -259,6 +267,8 @@ class CordnSyncLoopTest {
             assertEquals(1, source.subscribes)
 
             source.closeOpenStream()
+            // Reopened after the minimum spacing between passes, not as a failure.
+            advanceTimeBy(1_001)
             runCurrent()
 
             assertEquals(2, source.subscribes)
@@ -306,11 +316,28 @@ class CordnSyncLoopTest {
             source.setGroups("g1")
             source.subscribeSpendsBudgetTimes = 1
             loop.start(this)
-            advanceTimeBy(10)
+            advanceTimeBy(1_010)
             runCurrent()
 
             assertEquals(CordnSyncLoop.State.Live, loop.state.value, "a spent budget was treated as an outage")
             assertEquals(2, source.subscribes, "it did not re-subscribe")
+            loop.stop()
+        }
+
+    @Test
+    fun `a stream that ends at once is not reopened in a busy loop`() =
+        runTest {
+            // A clean return resets the backoff, so with nothing else in the way a coordinator
+            // that closes every subscription on arrival had the loop reopening it with no pause.
+            val source = FakeSource()
+            source.subscribeReturnsAtOnce = true
+            val loop = loopOver(source)
+            source.setGroups("g1")
+            loop.start(this)
+            advanceTimeBy(5_000)
+            runCurrent()
+
+            assertTrue(source.subscribes in 5..7, "${source.subscribes} subscriptions in five seconds")
             loop.stop()
         }
 
