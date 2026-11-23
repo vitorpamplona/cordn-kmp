@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
 
 /**
  * Everything one account needs to talk to one coordinator.
@@ -157,7 +158,14 @@ class CordnSession(
         keyPackageRef: String? = null,
     ): Long = manager.requestToJoin(gid, keyPackageRef ?: keyPackages.publishNew().keyPackageRef)
 
-    internal suspend fun close() = scope.close()
+    /** Quiesces the manager (see [CordnGroupManager.close]), then closes the transport under it. */
+    internal suspend fun close() {
+        try {
+            manager.close()
+        } finally {
+            scope.close()
+        }
+    }
 }
 
 /**
@@ -203,7 +211,13 @@ class CordnCoordinatorRegistry(
     private val handoff: CordnHandoffState? = null,
 ) {
     private val lock = Mutex()
+
+    /** Written under [lock] only. */
     private val sessions = mutableMapOf<HexKey, CordnSession>()
+
+    /** A copy of [sessions] for readers outside [lock], replaced whole by [publish]. */
+    @Volatile
+    private var published: Map<HexKey, CordnSession> = emptyMap()
 
     private val _coordinators = MutableStateFlow<List<CoordinatorConfig>>(emptyList())
 
@@ -248,7 +262,7 @@ class CordnCoordinatorRegistry(
         }
 
     /** The session for [coordinatorPubKey], or null if none is open. */
-    fun sessionOrNull(coordinatorPubKey: HexKey): CordnSession? = sessions[coordinatorPubKey]
+    fun sessionOrNull(coordinatorPubKey: HexKey): CordnSession? = published[coordinatorPubKey]
 
     /**
      * Restores sessions for [configs] and closes any coordinator not in it.
@@ -344,9 +358,13 @@ class CordnCoordinatorRegistry(
     ): CordnSession {
         // Same coordinator, different address or label. The transport is bound
         // to the relays, so it is reopened; the stores are not, so the groups
-        // and published KeyPackages survive untouched.
-        existing.close()
+        // and published KeyPackages survive untouched. The old manager is
+        // quiesced first (every group saved, every later call refused), so the
+        // new one restores what the old one last held and nothing the old one
+        // does afterwards can land over it.
         sessions.remove(config.pubKey)
+        publish()
+        existing.close()
         return open(config).also { publish() }
     }
 
@@ -382,6 +400,7 @@ class CordnCoordinatorRegistry(
     }
 
     private fun publish() {
+        published = sessions.toMap()
         _coordinators.value = sessions.values.map { it.config }
     }
 }

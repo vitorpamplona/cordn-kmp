@@ -133,6 +133,10 @@ class CordnGroupManager(
     @Volatile
     private var publishedKeyPackage = false
 
+    /** Set by [close]: every group operation refuses from then on. */
+    @Volatile
+    private var closed = false
+
     /** Guards [pendingRetirements] and [pendingRequestRetirements], which every group shares. */
     private val retirementLock = PlatformLock()
 
@@ -1780,7 +1784,29 @@ class CordnGroupManager(
     private suspend fun <T> withGroup(
         gid: String,
         block: suspend () -> T,
-    ): T = groupLocks.getOrPut(gid) { Mutex() }.withLock { block() }
+    ): T =
+        lockOf(gid).withLock {
+            if (closed) throw CordnGroupException("this manager was closed; use the coordinator's current session")
+            block()
+        }
+
+    private fun lockOf(gid: String): Mutex = groupLocks.getOrPut(gid) { Mutex() }
+
+    /**
+     * Stops this manager for good, leaving everything it held saved.
+     *
+     * A second manager over the same store (what [CordnCoordinatorRegistry] builds when a
+     * coordinator's relays change) must not start while this one can still write: its restore
+     * would read state this one had not saved yet, and this one's last save (a subscription's
+     * `finally`, which survives cancellation) would then land over the newer one's, rolling a
+     * group's ratchet back. So each group's lock is taken in turn: an operation already running
+     * finishes first, one still waiting refuses, and what changed is saved. Every later call that
+     * touches a group throws, and the save at the end of a subscription does nothing.
+     */
+    suspend fun close() {
+        closed = true
+        gidList().forEach { gid -> lockOf(gid).withLock { persistQuietly(gid) } }
+    }
 
     /**
      * Writes what changed of [gid] since the last write. Runs under [gid]'s lock.
@@ -1850,6 +1876,8 @@ class CordnGroupManager(
 
     /** Saves every group, each under its own lock; one that fails does not stop the others. */
     private suspend fun persistAll() {
+        // A closed manager saved everything at close, and the store may already be another's.
+        if (closed) return
         gidList().forEach { gid -> withGroup(gid) { persistQuietly(gid) } }
     }
 
