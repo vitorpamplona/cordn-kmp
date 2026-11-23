@@ -150,7 +150,7 @@ class CordnMessageKindsTest {
     }
 
     @Test
-    fun `a reaction keeps extra tags, which is how a custom emoji travels`() {
+    fun `a reaction keeps extra tags so a custom emoji travels`() {
         val emoji = CordnCustomEmoji.tag("catjam", "https://cdn.example/catjam.gif")
         val out = CordnMessageReferences.outbound(":catjam:", reactionTo = target(), extraTags = arrayOf(emoji))
         assertTrue(out.tags.any { it.contentEquals(emoji) })
@@ -158,7 +158,7 @@ class CordnMessageKindsTest {
     }
 
     @Test
-    fun `a mention gets a p tag, once, so it notifies`() {
+    fun `a mention gets exactly one p tag so it notifies`() {
         // cordn-web lights a message up for the accounts its p tags name; content alone notifies nobody.
         val npub = NPub.create(bob)
         val text = CordnMessageReferences.outbound("hi nostr:$npub and nostr:$npub")
