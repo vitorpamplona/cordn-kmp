@@ -330,7 +330,7 @@ class CoordinatorClient(
                         ?.let(onMessage)
                 },
             )
-        if (result.isError) throw CoordinatorException("msg_sub_many failed: ${result.error?.message}")
+        if (result.isError) throw CoordinatorRefusedException("msg_sub_many failed: ${result.error?.message}", result.error?.code)
     }
 
     // ---- plumbing --------------------------------------------------------
@@ -370,7 +370,7 @@ class CoordinatorClient(
     ): JsonObject {
         val result = mcp.callTool(method.wire, arguments, method.identity, timeoutMs)
         if (result.isError) {
-            throw CoordinatorException("${method.wire} failed: ${result.error?.message ?: "unknown error"}")
+            throw CoordinatorRefusedException("${method.wire} failed: ${result.error?.message ?: "unknown error"}", result.error?.code)
         }
         val body = result.result as? JsonObject ?: throw CoordinatorException("${method.wire} returned no result object")
         return body[CoordinatorFields.STRUCTURED_CONTENT]?.jsonObject

@@ -23,6 +23,7 @@ package com.vitorpamplona.cordn.client
 import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.cordn.spec00Coordinator.AvailableKeyPackage
+import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorRefusedException
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.messages.KeyPackageBundle
@@ -248,6 +249,9 @@ class CordnKeyPackages(
      * open the Welcome. Storing first makes the failure the harmless direction —
      * an unused bundle on disk.
      *
+     * Only a definitive refusal ([CoordinatorRefusedException]) drops the private half again. A
+     * timeout or a lost answer leaves it, because the coordinator may hold the package anyway.
+     *
      * @param lastResort marks it reusable. `spec/00.md` lets a last-resort
      *   package back several Welcomes, which is why a Welcome record is keyed
      *   by `(kp_ref, at)` rather than by ref alone.
@@ -262,14 +266,18 @@ class CordnKeyPackages(
         val result =
             try {
                 coordinator.publishKeyPackage(ref, Base64.encode(bundle.keyPackage.toTlsBytes()))
-            } catch (e: Exception) {
-                // The coordinator never took it, so nobody can invite us with
-                // it. Drop the local half rather than accumulate bundles that
-                // will never be used.
+            } catch (e: CoordinatorRefusedException) {
+                // The coordinator answered and refused, so nobody can invite us
+                // with it. Drop the local half rather than accumulate bundles
+                // that will never be used.
                 store.delete(ref)
                 _published.value = _published.value - ref
                 throw e
             }
+        // Any other failure (a timeout above all, which is a CancellationException) is ambiguous:
+        // the request may have reached the coordinator and been stored, and a package served
+        // there whose private half we deleted is an invitation nobody can open. So the half stays;
+        // an unused one costs a few bytes, and [spent] or [withdraw] clears it.
 
         invalidate()
         return Published(result.keyPackageRef, result.lastResort || lastResort, result.at)
@@ -294,6 +302,23 @@ class CordnKeyPackages(
                 null
             }
         }
+
+    /**
+     * Forgets the private half of [keyPackageRef] once its Welcome was accepted or declined,
+     * unless it is a last-resort package, which may back other Welcomes.
+     *
+     * A single-use package is consumed by the `kp_take` that built its Welcome, so the half has
+     * no use left but one: opening that Welcome again, which only an attacker who later reads
+     * this device's store would want to do (forward secrecy, RFC 9420 §16.8). Keeping them also
+     * grew the store without bound and kept [hasPublished] true for good. The coordinator is not
+     * told: there is nothing left there to withdraw.
+     */
+    suspend fun spent(keyPackageRef: String) {
+        val bundle = bundleFor(keyPackageRef) ?: return
+        if (bundle.keyPackage.isLastResort()) return
+        store.delete(keyPackageRef)
+        _published.value = _published.value - keyPackageRef
+    }
 
     /**
      * Withdraws [keyPackageRefs] from the coordinator and forgets their halves.

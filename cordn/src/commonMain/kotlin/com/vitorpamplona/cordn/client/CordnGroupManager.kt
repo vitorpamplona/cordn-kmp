@@ -240,6 +240,13 @@ class CordnGroupManager(
      */
     var deliveryListener: (Delivery) -> Unit = {}
 
+    /**
+     * Told the ref of each KeyPackage whose Welcome was accepted, declined or found stale, so the
+     * private half can be forgotten ([CordnKeyPackages.spent], which keeps a last-resort one).
+     * [CordnCoordinatorRegistry] wires it; a failure here never fails the join it follows.
+     */
+    var onKeyPackageSpent: suspend (keyPackageRef: String) -> Unit = {}
+
     /** What became of an own Commit whose call is still waiting on it. */
     private enum class CommitOutcome { WAITING, APPLIED, LOST }
 
@@ -1005,7 +1012,7 @@ class CordnGroupManager(
             } catch (e: Exception) {
                 retirementLock.withLock { pendingRetirements += acks }
                 throw e
-            }
+            }.filterNot { welcome -> acks.any { it.keyPackageRef == welcome.keyPackageRef && it.at == welcome.at } }
         val opened = mutableListOf<OpenedWelcome>()
         val skipped = mutableListOf<SkippedWelcome>()
         val stale = mutableListOf<ConsumedWelcomeRef>()
@@ -1053,6 +1060,7 @@ class CordnGroupManager(
         }
 
         retire(stale)
+        stale.forEach { spend(it.keyPackageRef) }
         return WelcomeInbox(opened, skipped)
     }
 
@@ -1078,6 +1086,7 @@ class CordnGroupManager(
         publishGids()
 
         retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
+        spend(welcome.keyPackageRef)
         return welcome.gid
     }
 
@@ -1090,6 +1099,18 @@ class CordnGroupManager(
      */
     suspend fun decline(welcome: OpenedWelcome) {
         retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
+        spend(welcome.keyPackageRef)
+    }
+
+    /** [onKeyPackageSpent], where a failure is logged and nothing more. */
+    private suspend fun spend(keyPackageRef: String) {
+        try {
+            onKeyPackageSpent(keyPackageRef)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "could not forget the private half of KeyPackage $keyPackageRef", e)
+        }
     }
 
     /**

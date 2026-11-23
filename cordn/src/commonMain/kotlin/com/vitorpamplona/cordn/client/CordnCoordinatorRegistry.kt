@@ -371,18 +371,22 @@ class CordnCoordinatorRegistry(
     private suspend fun open(config: CoordinatorConfig): CordnSession {
         val scope = scopes.open(accountPubKey, config)
         val health = CoordinatorHealth()
+        val keyPackages = CordnKeyPackages(accountPubKey, scope.coordinator, scope.keyPackageStore)
+        val manager =
+            CordnGroupManager(
+                accountPubKey = accountPubKey,
+                config = config,
+                coordinator = scope.coordinator,
+                store = scope.groupStore,
+                health = health,
+            )
+        // A Welcome answered is a single-use KeyPackage whose private half has no use left.
+        manager.onKeyPackageSpent = keyPackages::spent
         val session =
             CordnSession(
                 config = config,
-                manager =
-                    CordnGroupManager(
-                        accountPubKey = accountPubKey,
-                        config = config,
-                        coordinator = scope.coordinator,
-                        store = scope.groupStore,
-                        health = health,
-                    ),
-                keyPackages = CordnKeyPackages(accountPubKey, scope.coordinator, scope.keyPackageStore),
+                manager = manager,
+                keyPackages = keyPackages,
                 health = health,
                 scope = scope,
             )
