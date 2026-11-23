@@ -1659,8 +1659,11 @@ class CordnGroupManager(
     ) {
         val inbox = sync.inbox(gid)
         val payload = runCatching { SealedPayload.decode(sealed) }.getOrNull()
-        if (payload == null) {
-            inbox.noteUnopenable()
+        // Not the shape of any epoch's seal (spec/03.md §4), so not evidence of an epoch we
+        // missed: no member, ahead of us or not, posts one. It does not raise the BEHIND gate,
+        // which anyone who knows the gid could otherwise hold shut with a few bytes. A
+        // well-formed payload under a key we do not hold still does; see the plan's design note.
+        if (payload == null || payload.size < SealedPayload.MIN_SIZE) {
             return emit(Delivery.Undecryptable(gid, cursor, "not a sealed payload"))
         }
 

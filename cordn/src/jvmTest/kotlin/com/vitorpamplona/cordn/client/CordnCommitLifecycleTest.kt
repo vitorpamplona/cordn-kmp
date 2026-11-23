@@ -622,4 +622,18 @@ class CordnCommitLifecycleTest {
             assertTrue(g.alice.storedMessages(gid).isEmpty())
             assertFalse(g.alice.mayBeBehind(gid), "not evidence of a missed change either")
         }
+
+    @Test
+    fun `a payload no seal could produce does not hold changes shut`() =
+        runTest {
+            val g = aliceAndBob()
+            // Anyone who knows the gid can post; these are not the shape of any epoch's seal.
+            g.coordinator.inject(gid, "not base64 at all")
+            g.coordinator.inject(gid, Base64.encode(ByteArray(SealedPayload.MIN_SIZE - 1) { 7 }))
+            g.alice.catchUp { }
+
+            assertFalse(g.alice.mayBeBehind(gid))
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "still mine to change") }
+            assertEquals("still mine to change", g.alice.name())
+        }
 }
