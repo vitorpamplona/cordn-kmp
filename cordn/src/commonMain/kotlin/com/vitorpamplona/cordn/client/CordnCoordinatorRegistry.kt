@@ -410,8 +410,15 @@ class CordnCoordinatorRegistry(
         // epoch zero against a coordinator that is not there. Forgetting to
         // call this would look like "my groups are gone", which is also what a
         // real failure looks like.
-        session.manager.restore()
-        session.keyPackages.restore()
+        try {
+            session.manager.restore()
+            session.keyPackages.restore()
+        } catch (e: Exception) {
+            // Not a session, so nothing else will close what was opened for it: every retry
+            // would leave another transport behind.
+            scope.close()
+            throw e
+        }
 
         sessions[config.pubKey] = session
         return session

@@ -331,22 +331,52 @@ class CordnGroupManager(
     /** The group behind [gid], if this manager holds it. */
     fun group(gid: String): MlsGroup? = groups[gid]?.group
 
-    /** Restores every group and cursor the store holds. Call once at startup. */
+    private val _unrestorable = MutableStateFlow<Map<String, String>>(emptyMap())
+
+    /**
+     * Groups [restore] found in the store and could not read, by `gid`, with why.
+     *
+     * Left on disk as they are (a later version may read them) and held out of everything else:
+     * not synced, not shown in [gids], and no Welcome or new group may take their `gid`, which
+     * would write over them.
+     */
+    val unrestorable: StateFlow<Map<String, String>> = _unrestorable.asStateFlow()
+
+    /**
+     * Restores every group and cursor the store holds. Call once at startup.
+     *
+     * One group at a time: a group whose saved state does not decode is reported in
+     * [unrestorable] and the others are restored all the same, rather than one bad blob taking
+     * every group on the coordinator down with it.
+     */
     suspend fun restore() {
         store.listGroups().forEach { gid ->
-            withGroup(gid) {
-                val blob = store.loadGroup(gid) ?: return@withGroup
-                val slot = Slot(MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)).apply { dirty = false }
-                store.loadCursor(gid)?.let { cursor ->
-                    val echoes = store.loadEchoState(gid)
-                    sync.restore(gid, cursor, echoes)
-                    slot.savedCursor = cursor
-                    slot.savedEcho = echoes
+            try {
+                withGroup(gid) {
+                    val blob = store.loadGroup(gid) ?: return@withGroup
+                    val slot = Slot(MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)).apply { dirty = false }
+                    store.loadCursor(gid)?.let { cursor ->
+                        val echoes = store.loadEchoState(gid)
+                        sync.restore(gid, cursor, echoes)
+                        slot.savedCursor = cursor
+                        slot.savedEcho = echoes
+                    }
+                    groups[gid] = slot
                 }
-                groups[gid] = slot
+                if (gid in _unrestorable.value) _unrestorable.value -= gid
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "could not restore $gid; left in the store as it is", e)
+                _unrestorable.value += gid to (e.message ?: e::class.simpleName ?: "unreadable")
             }
         }
         publishGids()
+    }
+
+    /** Refuses to install a group over one [restore] could not read. */
+    private fun requireRestorable(gid: String) {
+        if (gid in _unrestorable.value) throw CordnGroupException("a group with gid $gid is saved here but could not be read; it is left as it is")
     }
 
     private fun publishGids() {
@@ -367,6 +397,7 @@ class CordnGroupManager(
     ): MlsGroup {
         val group =
             withGroup(gid) {
+                requireRestorable(gid)
                 require(groups[gid] == null) { "already in a group with gid $gid" }
                 val group =
                     MlsGroup.create(
@@ -1035,6 +1066,11 @@ class CordnGroupManager(
                 skipped += SkippedWelcome(welcome.keyPackageRef, UNKNOWN_GID)
                 return@forEach
             }
+            if (gid in _unrestorable.value) {
+                // Not retired: the group it names is unreadable here, not known to be ours.
+                skipped += SkippedWelcome(welcome.keyPackageRef, UNRESTORABLE_GROUP)
+                return@forEach
+            }
             if (groups[gid] != null) {
                 skipped += SkippedWelcome(welcome.keyPackageRef, ALREADY_A_MEMBER)
                 stale += ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)
@@ -1074,6 +1110,7 @@ class CordnGroupManager(
      */
     suspend fun accept(welcome: OpenedWelcome): String {
         withGroup(welcome.gid) {
+            requireRestorable(welcome.gid)
             require(groups[welcome.gid] == null) { "already in a group with gid ${welcome.gid}" }
 
             groups[welcome.gid] = Slot(welcome.group)
@@ -1951,6 +1988,9 @@ class CordnGroupManager(
 
         /** A stale invitation to a group we are already in. Nothing to decide. */
         const val ALREADY_A_MEMBER = "already a member of this group"
+
+        /** A Welcome to a group saved on this device that could not be read ([unrestorable]). */
+        const val UNRESTORABLE_GROUP = "this group is saved here but could not be read"
 
         /**
          * The delivery `gid` a Welcome implies, or null when it implies none.
