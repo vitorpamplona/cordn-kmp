@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.cordn.spec02Envelopes
 
+import com.vitorpamplona.cordn.client.CordnMentions
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.TagArray
 import com.vitorpamplona.quartz.nip01Core.core.fastFirstOrNull
@@ -216,19 +217,36 @@ object CordnMessageReferences {
         reactionTo?.let {
             // Not trimmed: an emoji is content, and trimming a reaction that is
             // deliberately whitespace-adjacent would change what was sent.
-            return Outbound(CordnMessageKinds.REACTION, content, reactionTags(it))
+            // Extra tags ride along: a custom emoji's `emoji`/`emoji-media` tag (CordnCustomEmoji).
+            return Outbound(CordnMessageKinds.REACTION, content, reactionTags(it) + extraTags)
         }
         deleteTo?.let {
             return Outbound(CordnMessageKinds.DELETION, "", deleteTags(it))
         }
         editTo?.let {
-            return Outbound(CordnMessageKinds.EDIT, content.trim(), editTags(it) + extraTags)
+            val text = content.trim()
+            return Outbound(CordnMessageKinds.EDIT, text, withMentions(editTags(it) + extraTags, text))
         }
+        val text = content.trim()
         return Outbound(
             kind = if (replyTo != null) CordnMessageKinds.THREAD_REPLY else CordnMessageKinds.TEXT,
-            content = content.trim(),
-            tags = (replyTo?.let(::replyTags) ?: emptyArray()) + extraTags,
+            content = text,
+            tags = withMentions((replyTo?.let(::replyTags) ?: emptyArray()) + extraTags, text),
         )
+    }
+
+    /**
+     * [tags] plus a `p` for every account [content] mentions (`nostr:npub1…`/`nostr:nprofile1…`)
+     * that no `p` names yet. A mention notifies through its `p` tag: cordn-web lights a message
+     * up for the accounts its `p` tags name, and the content alone notifies nobody.
+     */
+    fun withMentions(
+        tags: TagArray,
+        content: String,
+    ): TagArray {
+        val tagged = tags.mapNotNullTo(mutableSetOf()) { tag -> tag.getOrNull(1)?.takeIf { tag[0] == "p" } }
+        val added = CordnMentions.mentioned(content).filter { it !in tagged }.map { arrayOf("p", it) }
+        return if (added.isEmpty()) tags else tags + added.toTypedArray()
     }
 
     /**

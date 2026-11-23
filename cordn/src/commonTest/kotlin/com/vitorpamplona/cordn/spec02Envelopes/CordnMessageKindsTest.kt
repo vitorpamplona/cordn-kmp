@@ -23,6 +23,7 @@ package com.vitorpamplona.cordn.spec02Envelopes
 import com.vitorpamplona.cordn.spec02Envelopes.CordnMessageReferences.PinOp
 import com.vitorpamplona.cordn.spec02Envelopes.CordnMessageReferences.Target
 import com.vitorpamplona.quartz.nip01Core.core.TagArray
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -146,6 +147,29 @@ class CordnMessageKindsTest {
         assertEquals(CordnMessageKinds.EDIT, out.kind)
         assertEquals("fixed", out.content)
         assertEquals("url https://example.invalid/x", out.tags.value("imeta"))
+    }
+
+    @Test
+    fun `a reaction keeps extra tags, which is how a custom emoji travels`() {
+        val emoji = CordnCustomEmoji.tag("catjam", "https://cdn.example/catjam.gif")
+        val out = CordnMessageReferences.outbound(":catjam:", reactionTo = target(), extraTags = arrayOf(emoji))
+        assertTrue(out.tags.any { it.contentEquals(emoji) })
+        assertEquals("https://cdn.example/catjam.gif", CordnCustomEmoji.ofReaction(out.content, out.tags)?.url)
+    }
+
+    @Test
+    fun `a mention gets a p tag, once, so it notifies`() {
+        // cordn-web lights a message up for the accounts its p tags name; content alone notifies nobody.
+        val npub = NPub.create(bob)
+        val text = CordnMessageReferences.outbound("hi nostr:$npub and nostr:$npub")
+        assertEquals(listOf(bob), text.tags.filter { it[0] == "p" }.map { it[1] })
+
+        // A reply to bob already names him: no second p.
+        val reply = CordnMessageReferences.outbound("yes nostr:$npub", replyTo = target(pubKey = bob))
+        assertEquals(1, reply.tags.count { it[0] == "p" && it[1] == bob })
+
+        val edit = CordnMessageReferences.outbound("now with nostr:$npub", editTo = target())
+        assertTrue(edit.tags.any { it[0] == "p" && it[1] == bob })
     }
 
     @Test
