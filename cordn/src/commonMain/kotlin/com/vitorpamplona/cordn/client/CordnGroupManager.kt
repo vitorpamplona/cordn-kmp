@@ -65,6 +65,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -1162,8 +1163,27 @@ class CordnGroupManager(
         gidFor: (MlsGroup) -> String? = ::gidFrom,
     ): JoinResults {
         val inbox = pendingWelcomes(bundleFor, gidFor)
-        val joined = inbox.pending.map { accept(it) }
-        return JoinResults(joined, inbox.skipped)
+        val joined = mutableListOf<String>()
+        val skipped = inbox.skipped.toMutableList()
+        // Two Welcomes can name one group (invited twice, by two members); the newest epoch is
+        // joined, and the other is stale, as any Welcome for a group already held is. One item
+        // must not abort the batch.
+        inbox.pending.sortedByDescending { it.epoch }.forEach { welcome ->
+            if (groups[welcome.gid] != null) {
+                skipped += SkippedWelcome(welcome.keyPackageRef, ALREADY_A_MEMBER)
+                retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
+                spend(welcome.keyPackageRef)
+                return@forEach
+            }
+            try {
+                joined += accept(welcome)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                skipped += SkippedWelcome(welcome.keyPackageRef, e.message ?: "could not join")
+            }
+        }
+        return JoinResults(joined, skipped)
     }
 
     /**
@@ -1243,7 +1263,15 @@ class CordnGroupManager(
         // admins and so are all still here.
         val administered = gidList().filter { gid -> withGroup(gid) { groups[gid]?.group?.let { CordnGroupPolicy.isLocalAdmin(it.view()) } == true } }
         if (administered.isEmpty()) return emptyList()
-        return call { coordinator.takeJoinRequests(administered, drainRequestRetirements()) }
+        // Drained into a local, and put back when the call fails, as [pendingWelcomes] does:
+        // draining inline lost those acknowledgements for good on a failed take.
+        val acks = drainRequestRetirements()
+        return try {
+            call { coordinator.takeJoinRequests(administered, acks) }
+        } catch (e: Exception) {
+            retirementLock.withLock { pendingRequestRetirements += acks }
+            throw e
+        }
     }
 
     /**
@@ -1955,6 +1983,11 @@ class CordnGroupManager(
     private suspend fun <T> call(block: suspend () -> T): T =
         try {
             block().also { health.recordSuccess(clock()) }
+        } catch (e: CancellationException) {
+            // Our own cancellation (the loop stopped, the screen closed) says nothing about the
+            // coordinator. A timeout inside the call, with us still running, does.
+            if (currentCoroutineContext().isActive) health.recordFailure(clock(), e.message)
+            throw e
         } catch (e: Exception) {
             health.recordFailure(clock(), e.message)
             throw e

@@ -175,6 +175,27 @@ class CordnJoinRequestTest {
         }
 
     /** A KeyPackage plus the signed `kp_publish` event that binds it to [signer]. */
+    @Test
+    fun `a decline whose acknowledgement failed twice is still delivered`() =
+        runTest {
+            val alicesView = FakeCoordinator(callerPubKey = alice)
+            val bobsView = alicesView.viewAs(bob)
+            val aliceManager = manager(alice, alicesView)
+            val gid = "ack-room"
+            aliceManager.createGroup(gid, CordnGroupMetadata(name = "acks"))
+            val (_, bobsKeyPackage) = publicationFor(bobSigner)
+            bobsView.seedKeyPackage(bobsKeyPackage)
+            manager(bob, bobsView).requestToJoin(gid, bobsKeyPackage.keyPackageRef)
+
+            val request = aliceManager.pendingJoinRequests().single()
+            alicesView.failNext = 1
+            aliceManager.declineJoinRequest(request) // the ack is queued for the next take
+            alicesView.failNext = 1
+            runCatching { aliceManager.pendingJoinRequests() } // fails: the ack must not go with it
+
+            assertTrue(aliceManager.pendingJoinRequests().none { it.at == request.at }, "the decline was lost and the request came back")
+        }
+
     private fun publicationFor(
         signer: NostrSignerSync,
         ref: String? = null,
