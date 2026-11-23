@@ -265,6 +265,20 @@ class CordnCoordinatorRegistry(
     fun sessionOrNull(coordinatorPubKey: HexKey): CordnSession? = published[coordinatorPubKey]
 
     /**
+     * Runs [block] while the open session for [coordinatorPubKey], if any, leaves [gid] alone
+     * ([CordnGroupManager.whileIdle]). The guard [CordnLocalState.read] wants:
+     * `CordnLocalState.read(coordinators, registry::whileIdle) { storesFor(it) }`.
+     */
+    suspend fun whileIdle(
+        coordinatorPubKey: HexKey,
+        gid: String,
+        block: suspend () -> Unit,
+    ) {
+        val manager = sessionOrNull(coordinatorPubKey)?.manager
+        if (manager == null) block() else manager.whileIdle(gid, block)
+    }
+
+    /**
      * Restores sessions for [configs] and closes any coordinator not in it.
      *
      * The closing half is what makes this a restore rather than a bulk add: a

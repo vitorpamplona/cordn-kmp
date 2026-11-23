@@ -167,4 +167,75 @@ class CordnLocalStateTest {
             assertEquals(GroupCursor(2, 2), back.cursor)
             assertEquals(null, back.roomState, "a backup keeps no room state, so a restore writes none")
         }
+
+    /**
+     * A store a manager saves into while a backup reads it: the first [loadGroup] returns the old
+     * state and then lets a whole save run (the manager's order: state, then the cursor).
+     */
+    private class SavedUnderfoot : CordnGroupStore by InMemoryCordnGroupStore() {
+        private val inner = InMemoryCordnGroupStore()
+        var hook: (suspend () -> Unit)? = null
+
+        override suspend fun saveGroup(
+            gid: String,
+            state: ByteArray,
+        ) = inner.saveGroup(gid, state)
+
+        override suspend fun loadGroup(gid: String): ByteArray? {
+            val state = inner.loadGroup(gid)
+            hook?.let {
+                hook = null
+                it()
+            }
+            return state
+        }
+
+        override suspend fun listGroups() = inner.listGroups()
+
+        override suspend fun saveCursor(
+            gid: String,
+            cursor: GroupCursor,
+        ) = inner.saveCursor(gid, cursor)
+
+        override suspend fun loadCursor(gid: String) = inner.loadCursor(gid)
+    }
+
+    @Test
+    fun `a save landing mid-read never pairs an old state with a newer cursor`() =
+        runTest {
+            // Old state with the new cursor is the bad pair: restored, the device skips the Commit
+            // between them forever. The cursor is read before the state, so a save in between
+            // can only leave the state ahead, which the next catch-up re-reads harmlessly.
+            val groups = SavedUnderfoot()
+            groups.saveGroup("g1", byteArrayOf(1))
+            groups.saveCursor("g1", GroupCursor(1, 1))
+            groups.hook = {
+                groups.saveGroup("g1", byteArrayOf(2))
+                groups.saveCursor("g1", GroupCursor(2, 2))
+            }
+
+            val group = CordnLocalState.read(listOf(coordinator)) { CordnLocalState.Stores(groups, InMemoryCordnKeyPackageStore()) }.groups.single()
+            assertTrue(group.cursor!!.fetchCursor <= group.state.single().toLong(), "read state ${group.state.toList()} with cursor ${group.cursor}")
+        }
+
+    @Test
+    fun `each group is read inside the guard the caller gives`() =
+        runTest {
+            val source = seeded()
+            val guarded = mutableListOf<Pair<HexKey, String>>()
+            var inside = false
+            val state =
+                CordnLocalState.read(
+                    listOf(coordinator),
+                    guard = { coordinatorPubKey, gid, read ->
+                        guarded += coordinatorPubKey to gid
+                        inside = true
+                        read()
+                        inside = false
+                    },
+                ) { source.getValue(it) }
+            assertEquals(listOf(coordinator to "g1"), guarded)
+            assertEquals(1, state.groups.size)
+            assertTrue(!inside)
+        }
 }

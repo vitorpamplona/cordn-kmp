@@ -69,9 +69,32 @@ class CordnLocalState(
     )
 
     companion object {
-        /** Reads every group and KeyPackage held for [coordinators]. */
+        /** The 1.6 signature, kept so code compiled against it still links. */
+        @Deprecated("Use the overload with a guard.", level = DeprecationLevel.HIDDEN)
         suspend fun read(
             coordinators: List<HexKey>,
+            storesFor: suspend (coordinatorPubKey: HexKey) -> Stores,
+        ): CordnLocalState = read(coordinators, guard = { _, _, read -> read() }, storesFor = storesFor)
+
+        /**
+         * Reads every group and KeyPackage held for [coordinators].
+         *
+         * [guard] runs around each group's reads. While a manager of that coordinator is open it
+         * may be saving the same group at that moment, and a read that took the state from before
+         * a save and the cursor from after it restores into a device that skips the Commit in
+         * between forever. Pass [CordnCoordinatorRegistry.whileIdle], which holds the group's lock
+         * so no save can interleave.
+         *
+         * Without a lock the reads still go newest-written-last first: the cursor, the messages,
+         * the state, then the echo record, the reverse of the order a save writes them in. A save
+         * landing between two reads can then only leave a later item ahead of an earlier one: the
+         * state ahead of its cursor (the next catch-up re-reads what it already applied, and a
+         * message saved meanwhile may be missing), or the echo record ahead of the state (the safe
+         * direction, see `CordnGroupManager.persist`). Never the cursor ahead of the state.
+         */
+        suspend fun read(
+            coordinators: List<HexKey>,
+            guard: suspend (coordinatorPubKey: HexKey, gid: String, read: suspend () -> Unit) -> Unit = { _, _, read -> read() },
             storesFor: suspend (coordinatorPubKey: HexKey) -> Stores,
         ): CordnLocalState {
             val groups = mutableListOf<Group>()
@@ -79,18 +102,23 @@ class CordnLocalState(
             coordinators.forEach { coordinator ->
                 val stores = storesFor(coordinator)
                 stores.groups.listGroups().forEach { gid ->
-                    val state = stores.groups.loadGroup(gid) ?: return@forEach
-                    groups +=
-                        Group(
-                            coordinatorPubKey = coordinator,
-                            gid = gid,
-                            state = state,
-                            cursor = stores.groups.loadCursor(gid),
-                            roomState = stores.groups.loadRoomState(gid),
-                            echoState = stores.groups.loadEchoState(gid),
-                            joinedViaRequest = stores.groups.loadJoinedViaRequest(gid),
-                            messages = stores.groups.loadMessages(gid),
-                        )
+                    guard(coordinator, gid) {
+                        val store = stores.groups
+                        val cursor = store.loadCursor(gid)
+                        val messages = store.loadMessages(gid)
+                        val state = store.loadGroup(gid) ?: return@guard
+                        groups +=
+                            Group(
+                                coordinatorPubKey = coordinator,
+                                gid = gid,
+                                state = state,
+                                cursor = cursor,
+                                roomState = store.loadRoomState(gid),
+                                echoState = store.loadEchoState(gid),
+                                joinedViaRequest = store.loadJoinedViaRequest(gid),
+                                messages = messages,
+                            )
+                    }
                 }
                 stores.keyPackages.list().forEach { ref ->
                     val bundle = stores.keyPackages.load(ref) ?: return@forEach

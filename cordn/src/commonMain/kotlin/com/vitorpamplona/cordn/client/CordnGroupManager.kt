@@ -1814,6 +1814,18 @@ class CordnGroupManager(
     private fun lockOf(gid: String): Mutex = groupLocks.getOrPut(gid) { Mutex() }
 
     /**
+     * Runs [block] while nothing on this manager touches [gid]: no save, no ingest, no Commit.
+     *
+     * For a reader of [gid]'s stores outside this manager (a backup, a handoff:
+     * [CordnLocalState.read]), so it never sees one save half done. [block] must not call back
+     * into this manager for [gid]; the lock is not reentrant.
+     */
+    suspend fun <T> whileIdle(
+        gid: String,
+        block: suspend () -> T,
+    ): T = lockOf(gid).withLock { block() }
+
+    /**
      * Stops this manager for good, leaving everything it held saved.
      *
      * A second manager over the same store (what [CordnCoordinatorRegistry] builds when a
