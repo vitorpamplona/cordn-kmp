@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.cordn.spec02Envelopes
 
+import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.cordn.spec03Payloads.SealedPayload
 import com.vitorpamplona.mls.group.DecryptedMessage
@@ -43,9 +44,14 @@ import com.vitorpamplona.quartz.nip01Core.core.HexKey
  * the AAD a wire requirement rather than an optimisation, and it is the reason
  * this class exists instead of callers reaching for `MlsGroup.encrypt` directly.
  *
- * Using the AAD rather than the leaf credential also has a reason: the
- * credential names whichever key holds the leaf, and a linked device's leaf is
- * not the account. The AAD says who is *speaking*.
+ * The AAD is the sender's own claim, though: authenticated by the AEAD, but written by whoever
+ * holds the leaf. Taken alone it let any member post as any account, member or not, and every
+ * author-only rule downstream (edits, deletions, votes, RSVPs, cancellations in
+ * [CordnAnnotationIndex]) then judged the forgery as the victim's. So the receive side also does
+ * what §5 actually says: the AAD must equal the identity the **sender's leaf credential** binds
+ * ([CordnCredential]). Nothing is lost by it. Devices of one account share one leaf
+ * (`multi-device.md` §2), and an account holding several leaves holds each under its own
+ * pubkey, so an honest AAD always equals its leaf's credential; only a lie differs.
  *
  * `authenticated_data` is authenticated but **not encrypted**, so this binding
  * costs metadata: any party holding the ciphertext can read the sender's
@@ -75,7 +81,8 @@ object CordnApplicationMessage {
      *
      * Every check `spec/02.md` §5 and the reference client apply, in the order
      * that makes each one meaningful: open the seal, let MLS authenticate the
-     * sender, read the sender from the AAD, then hold the envelope to it.
+     * sender's leaf, read the sender from the AAD, hold the AAD to the identity
+     * that leaf's credential binds, then hold the envelope to it.
      *
      * @throws IllegalArgumentException naming the check that failed.
      */
@@ -85,11 +92,33 @@ object CordnApplicationMessage {
     ): ReceivedMessage {
         val mlsMessage = SealedPayload.open(sealedBase64, SealedPayload.applicationKey(group))
         val decrypted = group.decrypt(mlsMessage)
-        return open(decrypted)
+        return open(decrypted, CordnCredential.membersOf(group)[decrypted.senderLeafIndex])
     }
 
-    /** As [open], for a message some other path has already decrypted. */
-    fun open(decrypted: DecryptedMessage): ReceivedMessage {
+    /**
+     * As [open], for a message some other path has already decrypted, with [senderCredential]
+     * the account the sender's leaf credential names in the tree of the epoch it was sealed at
+     * ([CordnCredential.membersAt]), or null when that leaf carries no cordn identity.
+     */
+    fun open(
+        decrypted: DecryptedMessage,
+        senderCredential: HexKey?,
+    ): ReceivedMessage {
+        val received = readUnbound(decrypted)
+        require(senderCredential != null && received.sender == senderCredential) {
+            "cordn authenticated sender ${received.sender} is not the account its leaf credential names (${senderCredential ?: "none"})"
+        }
+        return received
+    }
+
+    /** As [open], without the leaf credential: the AAD is the sender's own claim, so this proves nothing about who sent it. */
+    @Deprecated(
+        "Does not bind the sender to its leaf credential (spec/02.md §5), so any member can claim any account. Use open(decrypted, senderCredential).",
+        ReplaceWith("open(decrypted, CordnCredential.membersAt(group, decrypted.epoch)?.get(decrypted.senderLeafIndex))"),
+    )
+    fun open(decrypted: DecryptedMessage): ReceivedMessage = readUnbound(decrypted)
+
+    private fun readUnbound(decrypted: DecryptedMessage): ReceivedMessage {
         // Empty is a rejection, not a default. Treating it as "unknown sender"
         // would let anyone drop the field and post as nobody in particular,
         // which the envelope's own `pubkey` would then be free to fill in.
@@ -107,8 +136,6 @@ object CordnApplicationMessage {
             sender = sender,
             senderLeafIndex = decrypted.senderLeafIndex,
             epoch = decrypted.epoch,
-            // Holds the envelope to the MLS-authenticated sender, which is the
-            // only thing making an unsigned envelope trustworthy at all.
             envelope = CordnEnvelope.decode(decrypted.content, senderIdentity = sender),
         )
     }
@@ -119,7 +146,7 @@ object CordnApplicationMessage {
 
 /** An application message that passed every authentication check. */
 data class ReceivedMessage(
-    /** The account pubkey MLS authenticated, from `authenticated_data`. */
+    /** The account that sent it: `authenticated_data`, held to the sender's leaf credential. */
     val sender: HexKey,
     /** Which leaf sent it. Not the same as [sender] for a linked device. */
     val senderLeafIndex: Int,

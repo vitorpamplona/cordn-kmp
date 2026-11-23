@@ -106,8 +106,10 @@ data class CordnDeliveredMessage(
  *   deletions are folded before edits and the order is load-bearing.
  *
  * Everything here is authenticated before it arrives: the envelope's `pubKey`
- * was bound to the MLS sender by [CordnApplicationMessage.open], so "same
- * author" is a real check rather than a claim comparison.
+ * was bound by [CordnApplicationMessage.open] to the account the sending
+ * leaf's MLS credential names, so "same author" is a real check rather than a
+ * claim comparison. (Until 1.7.0 it was bound only to `authenticated_data`,
+ * which the sender writes, so a member could post as anyone.)
  */
 class CordnAnnotationIndex private constructor(
     /** Every message by envelope id, annotations included. */
@@ -212,7 +214,7 @@ class CordnAnnotationIndex private constructor(
                 }
                 // A `k` that disagrees with the stored message is a mismatch.
                 if (ref.targetKind != target.envelope.kind) return@forEach
-                // Author-only. The pubkeys are MLS-authenticated, not claimed.
+                // Author-only. The pubkeys are bound to the leaf credential, not claimed.
                 if (target.envelope.pubKey != message.envelope.pubKey) return@forEach
                 deleted.add(ref.targetId)
             }

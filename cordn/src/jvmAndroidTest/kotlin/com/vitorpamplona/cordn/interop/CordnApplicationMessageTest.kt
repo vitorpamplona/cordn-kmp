@@ -103,7 +103,7 @@ class CordnApplicationMessageTest {
         val bare = group.encrypt(envelope().encode())
         val decrypted = group.decrypt(bare)
 
-        val error = assertFailsWith<IllegalArgumentException> { CordnApplicationMessage.open(decrypted) }
+        val error = assertFailsWith<IllegalArgumentException> { CordnApplicationMessage.open(decrypted, alice) }
         assertTrue(error.message?.contains("authenticated sender") == true, "got '${error.message}'")
     }
 

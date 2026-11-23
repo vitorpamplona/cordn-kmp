@@ -308,9 +308,11 @@ class CordnGroupManager(
         var former: List<Pair<Long, ByteArray>>? = null
         val formerMedia = mutableMapOf<Long, ByteArray?>()
 
-        /** Who is in the group at this epoch: the accounts, and the leaves they hold. */
-        var members: Set<HexKey>? = null
-        var leaves: Set<Int>? = null
+        /** The account each leaf's credential names at this epoch, by leaf index. */
+        var identities: Map<Int, HexKey>? = null
+
+        /** As [identities], for the retained former epochs, decoded once each. */
+        val formerIdentities = mutableMapOf<Long, Map<Int, HexKey>?>()
     }
 
     // ---- membership ------------------------------------------------------
@@ -1599,7 +1601,9 @@ class CordnGroupManager(
                     inbox.noteCurrentEpochReadable()
                     when (decrypted.contentType) {
                         ContentType.APPLICATION -> {
-                            val received = CordnApplicationMessage.open(decrypted)
+                            // spec/02.md §5: the sender is who the leaf's credential names, not
+                            // whatever the AAD claims. A leaf that read at this epoch is a member.
+                            val received = CordnApplicationMessage.open(decrypted, identitiesOf(slot)[decrypted.senderLeafIndex])
                             // The key that sealed its attachments is the epoch's it was read at.
                             val delivered = CordnDeliveredMessage(received.envelope, cursor, keys.media, receivedAt)
                             slot.pendingMessages.addLast(delivered)
@@ -1670,10 +1674,11 @@ class CordnGroupManager(
             // Application messages only: a Commit from a former epoch is one
             // that lost to the Commit we applied, and MLS refuses it.
             val decrypted = group.decryptFormerEpoch(opened)
-            val received = CordnApplicationMessage.open(decrypted)
-            val members = keys.members ?: CordnCredential.memberIdentities(group).also { keys.members = it }
-            val leaves = keys.leaves ?: group.members().mapTo(mutableSetOf()) { it.first }.also { keys.leaves = it }
-            if (received.sender !in members || received.senderLeafIndex !in leaves) {
+            // A member of the epoch it was sealed at, by that epoch's tree; and still holding that
+            // leaf now, or it is someone a later Commit removed (or whose leaf went to someone else).
+            val sealedBy = keys.formerIdentities.getOrPut(epoch) { CordnCredential.membersAt(group, epoch) }?.get(decrypted.senderLeafIndex)
+            val received = CordnApplicationMessage.open(decrypted, sealedBy)
+            if (identitiesOf(slot)[received.senderLeafIndex] != received.sender) {
                 return emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch by a sender no longer in the group"))
             }
             val mediaKey = keys.formerMedia.getOrPut(epoch) { CordnMediaEncryption.mediaKeyAt(group, epoch) }
@@ -1682,6 +1687,12 @@ class CordnGroupManager(
         } catch (e: Exception) {
             emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch: ${e.message ?: "could not open payload"}"))
         }
+    }
+
+    /** Who holds each leaf at [slot]'s current epoch, read once per epoch. */
+    private fun identitiesOf(slot: Slot): Map<Int, HexKey> {
+        val keys = keysOf(slot)
+        return keys.identities ?: CordnCredential.membersOf(slot.group).also { keys.identities = it }
     }
 
     /** [slot]'s keys for the epoch it is on, derived once per epoch. */

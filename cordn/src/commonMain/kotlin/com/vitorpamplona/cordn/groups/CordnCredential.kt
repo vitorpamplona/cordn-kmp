@@ -20,9 +20,11 @@
  */
 package com.vitorpamplona.cordn.groups
 
+import com.vitorpamplona.mls.codec.TlsReader
 import com.vitorpamplona.mls.group.MlsGroup
 import com.vitorpamplona.mls.tree.Credential
 import com.vitorpamplona.mls.tree.LeafNode
+import com.vitorpamplona.mls.tree.RatchetTree
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 
 /**
@@ -89,6 +91,23 @@ object CordnCredential {
      * not a cordn identity are skipped rather than reported as garbage.
      */
     fun membersOf(group: MlsGroup): Map<Int, HexKey> = group.members().mapNotNull { (index, leaf) -> identityOrNull(leaf)?.let { index to it } }.toMap()
+
+    /**
+     * Every member's account hex at [epoch], by leaf index: the current tree for the group's own
+     * epoch, the retained tree for a former epoch MLS still keeps, or null for one it does not.
+     *
+     * The sender of a message sealed at [epoch] is a member *of that epoch*: the tree that
+     * verified its signature is that epoch's, not today's.
+     */
+    fun membersAt(
+        group: MlsGroup,
+        epoch: Long,
+    ): Map<Int, HexKey>? {
+        if (epoch == group.epoch) return membersOf(group)
+        val retained = group.retainedEpochs().firstOrNull { it.epoch == epoch } ?: return null
+        val tree = RatchetTree.decodeTls(TlsReader(retained.treeBytes))
+        return (0 until tree.leafCount).mapNotNull { index -> identityOrNull(tree.getLeaf(index))?.let { index to it } }.toMap()
+    }
 
     /** The set of accounts holding at least one leaf. One account may hold several. */
     fun memberIdentities(group: MlsGroup): Set<HexKey> = membersOf(group).values.toSet()
