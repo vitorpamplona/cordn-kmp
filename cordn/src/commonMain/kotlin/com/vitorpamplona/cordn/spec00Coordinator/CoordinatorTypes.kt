@@ -137,3 +137,14 @@ class CoordinatorRefusedException(
     /** The JSON-RPC error code. */
     val code: Int?,
 ) : CoordinatorException(message)
+
+/**
+ * The call was refused before anything was sent: the link to the coordinator was already closed.
+ *
+ * As definitive as [CoordinatorRefusedException], from this side: nothing left the device, so the
+ * coordinator cannot have acted on it. A call that was in flight when the link closed is a plain
+ * [CoordinatorException], since it may have reached the coordinator.
+ */
+class CoordinatorNotSentException(
+    message: String,
+) : CoordinatorException(message)

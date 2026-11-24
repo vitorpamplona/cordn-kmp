@@ -24,6 +24,7 @@ import com.vitorpamplona.cordn.spec00Coordinator.AvailableKeyPackage
 import com.vitorpamplona.cordn.spec00Coordinator.ConsumedJoinRequestRef
 import com.vitorpamplona.cordn.spec00Coordinator.ConsumedWelcomeRef
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorException
+import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorNotSentException
 import com.vitorpamplona.cordn.spec00Coordinator.GroupMessage
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.cordn.spec00Coordinator.JoinRequest
@@ -65,13 +66,13 @@ internal class ClosableCoordinator(
     }
 
     private suspend fun <T> guarded(block: suspend () -> T): T {
-        if (closed) throw CoordinatorException(CLOSED)
+        if (closed) throw CoordinatorNotSentException(CLOSED)
         return try {
             coroutineScope {
                 val job = coroutineContext[Job]!!
                 inFlight[job] = Unit
                 try {
-                    if (closed) throw CoordinatorException(CLOSED)
+                    if (closed) throw CoordinatorNotSentException(CLOSED)
                     block()
                 } finally {
                     inFlight.remove(job)

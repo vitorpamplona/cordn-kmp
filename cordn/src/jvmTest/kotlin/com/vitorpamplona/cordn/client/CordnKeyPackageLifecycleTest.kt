@@ -22,6 +22,7 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
+import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorNotSentException
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorRefusedException
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.cordn.spec00Coordinator.PublishedKeyPackage
@@ -181,5 +182,49 @@ class CordnKeyPackageLifecycleTest {
             val keyPackages = CordnKeyPackages(bob, Publishing { throw CoordinatorRefusedException("kp_publish failed: no", -32000) }, store)
             assertFailsWith<CoordinatorRefusedException> { keyPackages.publishNew() }
             assertTrue(store.list().isEmpty())
+        }
+
+    @Test
+    fun `a first publish that timed out does not let maintain publish more`() =
+        runTest {
+            val store = InMemoryCordnKeyPackageStore()
+            var publishes = 0
+            val keyPackages =
+                CordnKeyPackages(
+                    bob,
+                    Publishing {
+                        publishes++
+                        withTimeout(10) { awaitCancellation() }
+                    },
+                    store,
+                )
+            assertFailsWith<Exception> { keyPackages.publishNew() }
+            assertTrue(keyPackages.hasPublished(), "the half stays: the publish may have landed")
+
+            // Nothing on the coordinator says it did, so the pool is not this device's to grow.
+            keyPackages.maintain()
+            assertEquals(1, publishes, "maintain published on the strength of a publish nobody answered")
+        }
+
+    @Test
+    fun `a publish refused by a closed link drops the private half`() =
+        runTest {
+            val store = InMemoryCordnKeyPackageStore()
+            val closed = ClosableCoordinator(FakeCoordinator(bob)).apply { close() }
+            val keyPackages = CordnKeyPackages(bob, closed, store)
+            assertFailsWith<CoordinatorNotSentException> { keyPackages.publishNew() }
+            assertTrue(store.list().isEmpty(), "a publish that never left the device kept its half")
+            assertFalse(keyPackages.hasPublished())
+        }
+
+    @Test
+    fun `maintain tops up once the coordinator lists a package of ours`() =
+        runTest {
+            val coordinator = FakeCoordinator(bob)
+            val keyPackages = CordnKeyPackages(bob, coordinator, InMemoryCordnKeyPackageStore())
+            keyPackages.publishNew()
+            keyPackages.maintain()
+            // The first, the pool's other four, and the last-resort one.
+            assertEquals(CordnKeyPackages.DEFAULT_POOL + 1, coordinator.calls.count { it == "kp_publish" })
         }
 }
