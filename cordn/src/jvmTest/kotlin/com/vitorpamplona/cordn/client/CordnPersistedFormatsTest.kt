@@ -104,6 +104,36 @@ class CordnPersistedFormatsTest {
         assertNull(CordnDeliveredMessageCodec.decode(legacy).mediaKey)
     }
 
+    @Test
+    fun `a stored message keeps the coordinator's receive time`() {
+        val message = CordnDeliveredMessage(envelope, 5, ByteArray(32) { 1 }, receivedAt = 1_757_000_000_250L)
+        val entry = CordnDeliveredMessageCodec.encode(message)
+        assertEquals(message, CordnDeliveredMessageCodec.decode(entry))
+        // Still version 1, so 1.6's decoder, which reads only `v`, `c`, `e` and `mk`, loads it.
+        assertTrue(entry.contains("\"v\":1,"), entry)
+        assertTrue(entry.contains("\"r\":1757000000250"), entry)
+    }
+
+    @Test
+    fun `an entry written before the receive time was kept loads without one`() {
+        // Exactly what 1.6.1 wrote: no `r`.
+        val legacy = """{"v":1,"c":5,"e":${envelope.toJsonObject()}}"""
+        val decoded = CordnDeliveredMessageCodec.decode(legacy)
+        assertNull(decoded.receivedAt)
+        assertEquals(envelope.createdAt, decoded.receivedAtSeconds)
+        assertEquals(false, CordnDeliveredMessageCodec.encode(CordnDeliveredMessage(envelope, 5)).contains("\"r\""))
+    }
+
+    @Test
+    fun `a receive time that is not a number drops only the receive time`() {
+        val good = CordnDeliveredMessageCodec.encode(CordnDeliveredMessage(envelope, 5, receivedAt = 42))
+        listOf("\"r\":\"42\"", "\"r\":{}", "\"r\":-1", "\"r\":1.5").forEach { bad ->
+            val decoded = CordnDeliveredMessageCodec.decode(good.replace("\"r\":42", bad))
+            assertNull(decoded.receivedAt, bad)
+            assertEquals(envelope, decoded.envelope)
+        }
+    }
+
     /** What 1.3.0's decoder returned for [bytes]: the two vectors, nothing after them. */
     private fun previousReleaseDecode(bytes: ByteArray): Pair<List<Pair<String, Boolean>>, List<Long>> {
         val reader = TlsReader(bytes)

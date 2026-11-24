@@ -105,6 +105,11 @@ object CordnAppEventView {
 
                     CordnMentions.attentionTarget(envelope, viewer)?.let { put("attention", it) }
 
+                    // What a row draws: every attachment CordnMediaTag.parseAll accepts, in order.
+                    if (envelope.tags.any { it.isNotEmpty() && it[0] == CordnMediaTag.TAG_NAME }) {
+                        putJsonArray("attachments") { CordnMediaTag.parseAll(envelope.tags).forEach { add(JsonPrimitive(it.url)) } }
+                    }
+
                     media(message)?.let { put("media", it) }
 
                     if (envelope.kind == CordnCallAnnouncement.KIND) {

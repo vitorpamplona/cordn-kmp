@@ -24,7 +24,9 @@ import com.vitorpamplona.cordn.appEncryptedMedia.CordnMediaEncryption
 import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.cordn.spec01GroupMetadata.CordnGroupMetadata
+import com.vitorpamplona.cordn.spec02Envelopes.CordnApplicationMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
+import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
 import com.vitorpamplona.cordn.spec03Payloads.SealedPayload
 import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
@@ -46,6 +48,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -346,6 +349,7 @@ class CordnCommitLifecycleTest {
         var dieAtNextCursor = false
         var dead = false
         var failNextAppend = false
+        var failNextSaveGroup = false
 
         private fun check() {
             if (dead) throw IllegalStateException("the process is gone")
@@ -368,6 +372,10 @@ class CordnCommitLifecycleTest {
             state: ByteArray,
         ) {
             check()
+            if (failNextSaveGroup) {
+                failNextSaveGroup = false
+                throw IllegalStateException("keystore locked")
+            }
             inner.saveGroup(gid, state)
         }
 
@@ -621,5 +629,106 @@ class CordnCommitLifecycleTest {
             assertTrue(delivered.none { it is CordnGroupManager.Delivery.Message }, "a removed member's message was shown: $delivered")
             assertTrue(g.alice.storedMessages(gid).isEmpty())
             assertFalse(g.alice.mayBeBehind(gid), "not evidence of a missed change either")
+        }
+
+    @Test
+    fun `a payload no seal could produce does not hold changes shut`() =
+        runTest {
+            val g = aliceAndBob()
+            // Anyone who knows the gid can post; these are not the shape of any epoch's seal.
+            g.coordinator.inject(gid, "not base64 at all")
+            g.coordinator.inject(gid, Base64.encode(ByteArray(SealedPayload.MIN_SIZE - 1) { 7 }))
+            g.alice.catchUp { }
+
+            assertFalse(g.alice.mayBeBehind(gid))
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "still mine to change") }
+            assertEquals("still mine to change", g.alice.name())
+        }
+
+    // ---- audit 3: a removed member's slot ----------------------------------
+
+    @Test
+    fun `a member removed and invited again joins the new Welcome and keeps its KeyPackage until then`() =
+        runTest {
+            val g = aliceAndBob()
+            g.alice.removeMember(gid, bob)
+            g.bob.catchUp { }
+            assertFalse(g.bob.group(gid)!!.isLocalMember(), "bob applied his own removal")
+
+            // Invited again, with a new KeyPackage: the first one was spent on the first join.
+            g.coordinator.keyPackages.remove("bb".repeat(16))
+            val (secondBundle, secondStored) = publication(bobSigner, "b2".repeat(16))
+            g.coordinator.seedKeyPackage(secondStored)
+            g.alice.invite(gid, bob)
+            assertEquals(3L, g.alice.group(gid)!!.epoch)
+
+            val spent = mutableListOf<String>()
+            val bob2 = g.bob
+            bob2.onKeyPackageSpent = { spent += it }
+            val results = bob2.joinPendingWelcomes({ ref -> secondBundle.takeIf { ref == secondStored.keyPackageRef } })
+            assertEquals(listOf(gid), results.joined, "skipped: ${results.skipped}")
+            assertEquals(listOf(secondStored.keyPackageRef), spent)
+            assertTrue(bob2.group(gid)!!.isLocalMember())
+            assertEquals(3L, bob2.group(gid)!!.epoch)
+
+            g.alice.send(gid, "welcome back")
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            bob2.catchUp { delivered += it }
+            assertEquals(
+                listOf("welcome back"),
+                delivered.filterIsInstance<CordnGroupManager.Delivery.Message>().map { it.received.envelope.content },
+                "got ${delivered.map { it::class.simpleName }}",
+            )
+        }
+
+    @Test
+    fun `a join whose save fails leaves no group behind and the Welcome open`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val aliceManager = manager(alice, coordinator)
+            val (bobBundle, bobStored) = publication(bobSigner, "bb".repeat(16))
+            coordinator.seedKeyPackage(bobStored)
+            aliceManager.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+            aliceManager.invite(gid, bob)
+
+            val bobStore = DyingStore().apply { failNextSaveGroup = true }
+            val bobManager = manager(bob, coordinator.viewAs(bob), bobStore)
+            val spent = mutableListOf<String>()
+            bobManager.onKeyPackageSpent = { spent += it }
+
+            val first = bobManager.joinPendingWelcomes({ bobBundle })
+            assertTrue(first.joined.isEmpty())
+            assertNull(bobManager.group(gid), "an unsaved group was left installed")
+            assertTrue(bobManager.gids.value.isEmpty())
+            assertTrue(spent.isEmpty(), "the KeyPackage was spent on a join that did not happen")
+
+            val second = bobManager.joinPendingWelcomes({ bobBundle })
+            assertEquals(listOf(gid), second.joined, "skipped: ${second.skipped}")
+            assertEquals(listOf(bobStored.keyPackageRef), spent)
+            assertNotNull(bobStore.inner.loadGroup(gid))
+        }
+
+    @Test
+    fun `a former-epoch message sealed under another epoch's key is refused`() =
+        runTest {
+            val g = aliceAndBob()
+            // Bob frames a message at epoch 1 and keeps the MLS bytes.
+            val bobAtOne = g.bob.group(gid)!!
+            val envelope = CordnEnvelope.build(bob, 1_757_000_000L, CordnGroupManager.CHAT_KIND, content = "out of place")
+            val atOne = SealedPayload.open(CordnApplicationMessage.seal(bobAtOne, bob, envelope), SealedPayload.applicationKey(bobAtOne))
+
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "two") }
+            val keyAtTwo = SealedPayload.applicationKey(g.alice.group(gid)!!)
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "three") }
+            assertEquals(3L, g.alice.group(gid)!!.epoch)
+
+            // Epoch 1's MLS message under epoch 2's seal: no client builds one, and reading it
+            // would key its sender and its media by epoch 2.
+            g.coordinator.inject(gid, SealedPayload.seal(atOne, keyAtTwo))
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            g.alice.catchUp { delivered += it }
+
+            assertTrue(delivered.none { it is CordnGroupManager.Delivery.Message }, "shown: $delivered")
+            assertTrue(g.alice.storedMessages(gid).isEmpty())
         }
 }

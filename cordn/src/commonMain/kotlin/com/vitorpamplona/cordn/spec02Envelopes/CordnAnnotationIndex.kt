@@ -43,15 +43,42 @@ data class CordnDeliveredMessage(
      * the message, so it is encrypted at rest with it.
      */
     val mediaKey: ByteArray? = null,
+    /**
+     * When the coordinator received it, in Unix milliseconds: the `at` it reported for the
+     * message (`spec/00.md` §7, `msg_fetch_many`/`msg_post`), or null for a message stored
+     * before it was kept.
+     *
+     * Unlike the envelope's `created_at`, which is the sender's claim, this is the coordinator's
+     * clock, and it rises with the [cursor]. cordn-web judges a poll's deadline by it
+     * ([CordnPolls.tally]), so a vote whose sender backdated it past a closed poll does not
+     * count.
+     */
+    val receivedAt: Long? = null,
 ) {
+    /** The 1.6 constructor, kept so code compiled against it still links. */
+    @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
+    constructor(envelope: CordnEnvelope, cursor: Long, mediaKey: ByteArray? = null) : this(envelope, cursor, mediaKey, null)
+
+    /** The 1.6 `copy`, kept so code compiled against it still links. */
+    @Deprecated("Use copy with receivedAt.", level = DeprecationLevel.HIDDEN)
+    fun copy(
+        envelope: CordnEnvelope = this.envelope,
+        cursor: Long = this.cursor,
+        mediaKey: ByteArray? = this.mediaKey,
+    ): CordnDeliveredMessage = CordnDeliveredMessage(envelope, cursor, mediaKey, receivedAt)
+
+    /** The coordinator's receive time in Unix seconds when known, else the sender's `created_at`. */
+    val receivedAtSeconds: Long get() = receivedAt?.floorDiv(1000L) ?: envelope.createdAt
+
     // By content: a data class compares a ByteArray by reference.
     override fun equals(other: Any?): Boolean =
         other is CordnDeliveredMessage &&
             envelope == other.envelope &&
             cursor == other.cursor &&
+            receivedAt == other.receivedAt &&
             (mediaKey?.contentEquals(other.mediaKey) ?: (other.mediaKey == null))
 
-    override fun hashCode(): Int = 31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)
+    override fun hashCode(): Int = 31 * (31 * (31 * envelope.hashCode() + cursor.hashCode()) + (mediaKey?.contentHashCode() ?: 0)) + receivedAt.hashCode()
 }
 
 /**
@@ -79,8 +106,10 @@ data class CordnDeliveredMessage(
  *   deletions are folded before edits and the order is load-bearing.
  *
  * Everything here is authenticated before it arrives: the envelope's `pubKey`
- * was bound to the MLS sender by [CordnApplicationMessage.open], so "same
- * author" is a real check rather than a claim comparison.
+ * was bound by [CordnApplicationMessage.open] to the account the sending
+ * leaf's MLS credential names, so "same author" is a real check rather than a
+ * claim comparison. (Until 1.7.0 it was bound only to `authenticated_data`,
+ * which the sender writes, so a member could post as anyone.)
  */
 class CordnAnnotationIndex private constructor(
     /** Every message by envelope id, annotations included. */
@@ -107,7 +136,16 @@ class CordnAnnotationIndex private constructor(
      * lacked, as cordn-web's annotation index picks it.
      */
     val reactionEmoji: Map<HexKey, Map<String, CordnCustomEmoji>> = emptyMap(),
+    /** Every poll in the stream with the vote that counts per voter, folded once ([CordnPolls.votes]). */
+    val polls: CordnPolls.Votes = CordnPolls.votes(emptyList()),
 ) {
+    /** [pollId]'s tally as [viewer] sees it at [nowSeconds] (see [CordnPolls.tally]), from the one fold. */
+    fun tallyOf(
+        pollId: HexKey,
+        viewer: HexKey,
+        nowSeconds: Long,
+    ): CordnPolls.Tally? = polls.tally(pollId, viewer, nowSeconds)
+
     /** Who pinned a message and when, kept so a pin list can be ordered. */
     data class PinState(
         val targetId: HexKey,
@@ -185,7 +223,7 @@ class CordnAnnotationIndex private constructor(
                 }
                 // A `k` that disagrees with the stored message is a mismatch.
                 if (ref.targetKind != target.envelope.kind) return@forEach
-                // Author-only. The pubkeys are MLS-authenticated, not claimed.
+                // Author-only. The pubkeys are bound to the leaf credential, not claimed.
                 if (target.envelope.pubKey != message.envelope.pubKey) return@forEach
                 deleted.add(ref.targetId)
             }
@@ -267,6 +305,7 @@ class CordnAnnotationIndex private constructor(
                 cancelledEvents = calendar.cancelled,
                 unsupportedEvents = calendar.invalid,
                 reactionEmoji = reactionEmoji,
+                polls = CordnPolls.votes(messages),
             )
         }
     }

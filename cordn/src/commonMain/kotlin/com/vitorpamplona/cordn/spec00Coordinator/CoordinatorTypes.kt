@@ -120,7 +120,31 @@ data class PostedMessage(
 )
 
 /** Raised when the coordinator answers with a JSON-RPC error or an unusable body. */
-class CoordinatorException(
+open class CoordinatorException(
     message: String,
     cause: Throwable? = null,
 ) : IllegalStateException(message, cause)
+
+/**
+ * The coordinator answered, and the answer was a JSON-RPC error: it refused the call.
+ *
+ * Apart from every other failure because it is the only definitive one. A timeout, a dropped
+ * relay or an answer that would not parse leaves open whether the coordinator acted on the
+ * request (a `kp_publish` may be stored, a `msg_post` sequenced); a refusal does not.
+ */
+class CoordinatorRefusedException(
+    message: String,
+    /** The JSON-RPC error code. */
+    val code: Int?,
+) : CoordinatorException(message)
+
+/**
+ * The call was refused before anything was sent: the link to the coordinator was already closed.
+ *
+ * As definitive as [CoordinatorRefusedException], from this side: nothing left the device, so the
+ * coordinator cannot have acted on it. A call that was in flight when the link closed is a plain
+ * [CoordinatorException], since it may have reached the coordinator.
+ */
+class CoordinatorNotSentException(
+    message: String,
+) : CoordinatorException(message)

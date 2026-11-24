@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlin.time.TimeSource
 
 /**
  * The three things a sync loop needs from a group manager.
@@ -189,15 +190,27 @@ class CordnSyncLoop(
                         continue
                     }
 
+                    val passStarted = TimeSource.Monotonic.markNow()
                     _state.value = State.CatchingUp
                     source.catchUp(onDelivery)
 
                     _state.value = State.Live
-                    subscribeUntilGroupsChange(gids)
+                    val groupsChanged = subscribeUntilGroupsChange(gids)
 
                     // Any completed pass is a working coordinator, including a
                     // subscription that simply timed out.
                     attempt = 0
+
+                    // A stream that ends at once without an error resets the
+                    // backoff above and would be reopened at once, forever: a
+                    // coordinator that closes every subscription on arrival
+                    // turned the loop into a busy one. A pass that ended on its
+                    // own is spaced at least [minBackoffMs] from the last;
+                    // a group joined mid-stream still re-subscribes at once.
+                    if (!groupsChanged) {
+                        val remaining = minBackoffMs - passStarted.elapsedNow().inWholeMilliseconds
+                        if (remaining > 0) delay(remaining)
+                    }
                 } catch (e: CancellationException) {
                     // Only OUR cancellation may end the loop. A coordinator
                     // that does not answer inside the RPC budget surfaces as
@@ -223,12 +236,12 @@ class CordnSyncLoop(
         }
 
     /**
-     * Holds a subscription until it closes or the group set changes.
+     * Holds a subscription until it closes or the group set changes; true for the latter.
      *
      * The watcher is what makes a freshly joined group live immediately instead
      * of at the next timeout.
      */
-    private suspend fun subscribeUntilGroupsChange(opened: Set<String>) =
+    private suspend fun subscribeUntilGroupsChange(opened: Set<String>): Boolean =
         coroutineScope {
             val subscription =
                 async {
@@ -246,8 +259,14 @@ class CordnSyncLoop(
             val changed = async { source.gids.first { it != opened } }
 
             select {
-                subscription.onAwait { changed.cancel() }
-                changed.onAwait { subscription.cancel() }
+                subscription.onAwait {
+                    changed.cancel()
+                    false
+                }
+                changed.onAwait {
+                    subscription.cancel()
+                    true
+                }
             }
         }
 

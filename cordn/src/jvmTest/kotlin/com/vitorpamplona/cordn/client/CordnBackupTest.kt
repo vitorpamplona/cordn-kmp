@@ -22,14 +22,19 @@ package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
+import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
+import com.vitorpamplona.cordn.sync.PendingEpochOperation
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalEncodingApi::class)
 class CordnBackupTest {
     private val account = "a".repeat(64)
     private val coordinator = "b".repeat(64)
@@ -197,8 +202,103 @@ class CordnBackupTest {
         assertEquals(emptyList(), opened.groups.first { it.gid == "room-2" }.messages)
     }
 
+    @Test
+    fun `the echo record survives the round trip`() {
+        val echo = EchoState(ownMessageCursors = listOf(7, 8), unopenable = 2)
+        val withEcho = archive.copy(groups = archive.groups.map { if (it.gid == "room-1") it.copy(echoState = echo) else it })
+        val opened = CordnBackup.open(CordnBackup.seal(withEcho, "pw", cheap), "pw")
+
+        assertEquals(echo, opened.groups.first { it.gid == "room-1" }.echoState)
+        assertEquals(null, opened.groups.first { it.gid == "room-2" }.echoState)
+        assertEquals(
+            echo,
+            opened
+                .toLocalState()
+                .groups
+                .first { it.gid == "room-1" }
+                .echoState,
+            "a restore lays it down",
+        )
+    }
+
+    @Test
+    fun `a version 3 file opens with its echo record`() {
+        // Sealed by 1.7.0 code (version 3, logN 10, passphrase "frozen"): the archive above,
+        // room-1 only, carrying V3_ECHO. Frozen: never regenerate.
+        val sealed = Base64.decode(V3_FILE)
+        assertEquals(3, ((sealed[MAGIC_LENGTH].toInt() and 0xff) shl 8) or (sealed[MAGIC_LENGTH + 1].toInt() and 0xff))
+        val opened = CordnBackup.open(sealed, "frozen")
+        val group = opened.groups.single()
+        assertEquals("room-1", group.gid)
+        assertEquals(GroupCursor(7, 9), group.cursor)
+        assertTrue(group.joinedViaRequest)
+        assertEquals(listOf("hello", "again"), group.messages.map { it.envelope.content })
+        assertEquals(V3_ECHO, group.echoState)
+        assertEquals(listOf("kp-ref"), opened.keyPackages.map { it.keyPackageRef })
+    }
+
+    @Test
+    fun `a version 2 file still opens, with no echo record`() {
+        // Sealed by 1.7.0-candidate code (version 2, logN 10, passphrase "frozen"). Frozen: never regenerate.
+        val opened = CordnBackup.open(Base64.decode(V2_FILE), "frozen")
+        val group = opened.groups.single()
+        assertEquals("room-1", group.gid)
+        assertEquals(GroupCursor(7, 9), group.cursor)
+        assertEquals(null, group.echoState)
+        assertEquals(listOf("kp-ref"), opened.keyPackages.map { it.keyPackageRef })
+    }
+
+    @Test
+    fun `a header asking for more scrypt than any backup uses is refused before the KDF runs`() {
+        // logN sits in front of the AEAD check, so an edited header used to cost the device the
+        // memory it asked for (2^22: 4 GiB) before the tag could refuse it.
+        val sealed = CordnBackup.seal(archive, "pw", cheap)
+        sealed[MAGIC_LENGTH + 2] = 19
+        val error = assertFailsWith<IllegalArgumentException> { CordnBackup.open(sealed, "pw") }
+        assertTrue(error.message!!.contains("scrypt cost"), error.message)
+        // The default still opens.
+        assertEquals(archive, CordnBackup.open(CordnBackup.seal(archive, "pw"), "pw"))
+    }
+
     private companion object {
+        /** The echo record frozen into [V3_FILE]: one of each thing the record carries. */
+        val V3_ECHO =
+            EchoState(
+                pendingCommits =
+                    listOf(
+                        PendingEpochOperation("c2VhbGVkLXBlbmRpbmc=", localStateApplied = false, fromEpoch = 3),
+                        PendingEpochOperation("c2VhbGVkLWxvc3Q=", localStateApplied = false, status = PendingEpochOperation.Status.LOST, fromEpoch = 2, landedAt = 6),
+                    ),
+                ownMessageCursors = listOf(7, 8),
+                unopenable = 2,
+            )
+
         const val MAGIC_LENGTH = 8
+
+        val V3_FILE =
+            "Q09SRE5CQUsAAwouDLmbqMq14Kt6o3Kkrj9lUC1d/FVz7WLt972aEczFIGpzVZZa6zJcyWI6rTTmHsUigUtzYRmpDcGfTiHpvLMT" +
+                "kNlEON4VDxcAEPe5n6xBKs3iKwF/tKENHtkZoutzIZmR523ETGYfTNc0t52izBzI6sZjLXtgs85mSDQAmeXbjd8HdTw0dZp5ZBnu" +
+                "tpliR3udcTgP0Hzvq3EAJGtsvtpuOWraO9CZ0MtPEIIET8mVZ8AJ1jx8iwxN7labEqzBR8GVxz/SZApMXRfFN7QprIyG1ogzRrqY" +
+                "ZU9Dc7YQiFA4Dm/iEkh07M/2nycq4smecRach7rGECQyvkgQZVLRUTXWvAG+yTNCV8a9vOCjrYGpiWTqbP0duVfh7dq3htKU0Tdl" +
+                "bYI9baSaEI9imlxxpOTy1Ypg35OTUnp7rObEkZS0XnwN8CVcznRoQ3K5CMyErzCwv3gfa6dJ/t25Yk78mhrBn4ZtDfphMJ7OanbV" +
+                "gft038SuyeMhLTzixiMx3dMkmqihaa1+CBRQZA/ewRKP/vHqP5o2GSxh8vqxt8NReTO2VQaFvEHx4HphNzxms4jlr5XxzEyc9AkH" +
+                "L9QaUkFsAUODxfYL9KYy9rMuGhSNhM0NyOBZCiP8CtHZWwf+Tl6h3xDRgUMWTcvuMLfrOV6ZcRlyC6CjCblT2f1M6YXSl3YrgK2x" +
+                "4S7bLMUozXFBzyfamcDNi7DB9102k487HZ8vOoPROELo3VVA2oYsSsbY6oQLgx3TvdhOfhUJAwv68TXCMvF/fxn0ZuwHFW1yihlt" +
+                "jmCJN67iHdq+i5dt90VBJKJUdprIu9ufMzIV3myoSoUZqQ9xCOoStRbRVN5CoUtTPiWF1iNaMe4DuaYH3wFVXBiGun0nqNYwzyfb" +
+                "CbHdFZbq0vXqW+IIrr9Pyg1paNfvu6O1IWXt6huGbvX/grcF55HyeDtmNPRnXX7ZCzdND20r5LARwc33QL2N221mmMRqYUAiE+/U" +
+                "UE2vNx0T1sc/pF8+jzM0uHNRXw5gTZT3sTWc6RKe+saH6Kh/BWzNOVDWFouGa7K004LwYntQj622D3PS3ljPV10RJISM77GTbr4G" +
+                "uUAg50DFz/Sp6wbNNi9gWUwXaQoREPgZ4AcMxCT2MIKg4Y4OkswFfd29fast7EfHd4H0TBvW6qLC9eDmYHsFFNE8r7bhc7lPDf9T" +
+                "BhbzH4J2KDC2oj3PCfuf+S44sD/Setgud/t1g0Y07d4hB22TgQ2MCq5/xMxVCPWZLXZZMdUvm0/a5dmaiwWZ+9kKbas+3lXsOvl/" +
+                "nsBInG8rEyWrOS8zLrNmfK6IOEyuWxw3hFhZjlqovf/3Mdcr9SrhHdTQo5YTr7pUe9CK06PSO8/OuUty1vRj55NEm+8zKkc5gzJO" +
+                "bCa2aiZA+G/Cbrr8I4Txpf8b7Us="
+
+        val V2_FILE =
+            "Q09SRE5CQUsAAgrats/LV/DVHgpfeQlKTaCIOscr8+HCtlATomhFDunPnUzRV61IJ21kXoSKLlBE4qs9odA+c1B3xXUAuBHgVkdz" +
+                "81SWjB41mXnxWUf+xAZtDyRmxGWffBMuZxmBxdQaDInpbuxJxM1bLeEkETvX3Y7RJFFUwJNCw+DWXHEP+Pze/fYhntJxVS6dA/on" +
+                "xeEsBfEI85Zem18j567PFhDrA4ZDm9xBfOzV1BEA9/FqRxB2IYeeSA+k8xwya0AhJJ8kVklCwEXHp1CjgfhY4lOvKZelAc5eBoTY" +
+                "BRD9w8H24IQTKsqzLWD2/QZvwIcb/6P931HkuTccV//U6zujBTnhdoxq1rcYlYT+AZSlzTKcodkAL+V3rVpEUFsTkJWqVYYLgz+b" +
+                "H+A1g5cQDYhTgzpGgoecDm8WrDsLKUJbZKVkq0IHQeKNjoE+VI8mkEKTno/F1Ii0H/Eefa5tBzfg3ZKYaUF+aTG/5ih27ft09Fff" +
+                "8/pkZkuMeZ+pChrvmNEqUw3xXKGdRHW+y2WkIW/w2r9A97x6Uvj5ealtMm+L"
 
         /** magic(8) + version(2) + logN(1). */
         const val SALT_AT = 11

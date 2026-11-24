@@ -24,6 +24,7 @@ import androidx.compose.runtime.Immutable
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
 import com.vitorpamplona.quartz.nip01Core.core.TagArray
 import com.vitorpamplona.quartz.nip01Core.core.fastFirstOrNull
+import com.vitorpamplona.quartz.nip01Core.core.fastForEach
 
 /**
  * NIP-88 polls as cordn-web 0.7.0 sends them (`src/lib/chat/polls.ts`), rule for rule: no spec
@@ -38,10 +39,10 @@ import com.vitorpamplona.quartz.nip01Core.core.fastFirstOrNull
  * - **Tally**: one vote per account, its latest in coordinator order. A vote that names an
  *   unknown option, picks more than one in a single-choice poll, or came after the deadline
  *   does not count. Deletions do not retract votes (cordn-web, after NIP-88).
- *
- * One known difference: cordn-web judges the deadline by the coordinator's receive time, which
- * [CordnDeliveredMessage] does not keep; this uses the vote's `created_at`, so a vote whose
- * sender backdated it past a closed poll counts here and not there.
+ * - **Deadline**: judged by when the coordinator received the vote
+ *   ([CordnDeliveredMessage.receivedAt], whole seconds), as cordn-web judges it, not by the
+ *   vote's `created_at`, which is the sender's claim: a vote backdated past a closed poll does
+ *   not count. A message stored before the receive time was kept falls back to `created_at`.
  */
 object CordnPolls {
     const val MIN_OPTIONS = 2
@@ -143,7 +144,8 @@ object CordnPolls {
     ): Response? {
         if (kind != CordnMessageKinds.POLL_RESPONSE || tags.size > MAX_TAGS) return null
         val pollId = tags.fastFirstOrNull { it.isNotEmpty() && it[0] == "e" }?.getOrNull(1)?.ifEmpty { null } ?: return null
-        val optionIds = tags.filter { it.isNotEmpty() && it[0] == "response" }.map { it.getOrNull(1) ?: "" }
+        val optionIds = ArrayList<String>(2)
+        tags.fastForEach { if (it.isNotEmpty() && it[0] == "response") optionIds.add(it.getOrNull(1) ?: "") }
         if (!isSelectionShape(optionIds)) return null
         return Response(pollId, optionIds)
     }
@@ -151,40 +153,83 @@ object CordnPolls {
     /**
      * The tally of the poll [pollId] over a group's [messages], as [viewer] sees it at
      * [nowSeconds], or null when the poll is not there or does not parse.
+     *
+     * Folds the whole stream for one poll. A room showing several polls folds once with [votes]
+     * (or reads [CordnAnnotationIndex.tallyOf]) and asks it per poll.
      */
     fun tally(
         messages: Collection<CordnDeliveredMessage>,
         pollId: HexKey,
         viewer: HexKey,
         nowSeconds: Long,
-    ): Tally? {
-        val poll = messages.firstOrNull { it.envelope.id == pollId } ?: return null
-        val definition = definition(poll.envelope.kind, poll.envelope.content, poll.envelope.tags) ?: return null
-        val known = definition.options.mapTo(mutableSetOf()) { it.id }
+    ): Tally? = votes(messages, onlyPoll = pollId).tally(pollId, viewer, nowSeconds)
 
-        val effective = mutableMapOf<HexKey, Pair<CordnDeliveredMessage, Response>>()
+    /** Every poll in [messages] with its counting votes, folded in one pass over the stream. */
+    fun votes(messages: Collection<CordnDeliveredMessage>): Votes = votes(messages, onlyPoll = null)
+
+    private fun votes(
+        messages: Collection<CordnDeliveredMessage>,
+        onlyPoll: HexKey?,
+    ): Votes {
+        val polls = mutableMapOf<HexKey, Poll>()
         messages.forEach { message ->
+            val envelope = message.envelope
+            if (envelope.kind != CordnMessageKinds.POLL) return@forEach
+            if (onlyPoll != null && envelope.id != onlyPoll) return@forEach
+            if (envelope.id in polls) return@forEach
+            val definition = definition(envelope.kind, envelope.content, envelope.tags) ?: return@forEach
+            polls[envelope.id] = Poll(message.cursor, definition, definition.options.mapTo(HashSet()) { it.id })
+        }
+        if (polls.isEmpty()) return Votes(emptyMap())
+
+        messages.forEach { message ->
+            if (message.envelope.kind != CordnMessageKinds.POLL_RESPONSE) return@forEach
             val response = response(message.envelope.kind, message.envelope.tags) ?: return@forEach
-            if (response.pollId != pollId) return@forEach
+            val poll = polls[response.pollId] ?: return@forEach
+            val definition = poll.definition
             // A vote the coordinator sequenced before the poll cannot be for it.
             if (message.cursor < poll.cursor) return@forEach
-            if (definition.endsAt != null && message.envelope.createdAt > definition.endsAt) return@forEach
+            if (definition.endsAt != null && message.receivedAtSeconds > definition.endsAt) return@forEach
             if (definition.type == Type.SINGLE && response.optionIds.size != 1) return@forEach
-            if (!response.optionIds.all { it in known }) return@forEach
+            if (!response.optionIds.all { it in poll.known }) return@forEach
 
+            // One vote per account, its latest in coordinator order.
             val voter = message.envelope.pubKey.lowercase()
-            val current = effective[voter]
-            if (current == null || message.cursor > current.first.cursor) effective[voter] = message to response
+            val current = poll.counted[voter]
+            if (current == null || message.cursor > current.first) poll.counted[voter] = message.cursor to response.optionIds
         }
+        return Votes(polls)
+    }
 
-        val votes = effective.values.map { it.second.optionIds }
-        return Tally(
-            definition = definition,
-            options = definition.options.map { option -> OptionResult(option.id, option.label, votes.count { option.id in it }) },
-            participants = votes.size,
-            selection = effective[viewer.lowercase()]?.second?.optionIds ?: emptyList(),
-            isOpen = definition.endsAt == null || nowSeconds < definition.endsAt,
-        )
+    internal class Poll(
+        val cursor: Long,
+        val definition: Definition,
+        val known: Set<String>,
+        /** voter → (cursor, option ids) of the vote that counts. */
+        val counted: MutableMap<HexKey, Pair<Long, List<String>>> = mutableMapOf(),
+    )
+
+    /** The polls of one stream and the vote that counts for each voter, from [votes]. */
+    class Votes internal constructor(
+        private val polls: Map<HexKey, Poll>,
+    ) {
+        /** [pollId]'s tally as [viewer] sees it at [nowSeconds], or null when the stream holds no such poll. */
+        fun tally(
+            pollId: HexKey,
+            viewer: HexKey,
+            nowSeconds: Long,
+        ): Tally? {
+            val poll = polls[pollId] ?: return null
+            val definition = poll.definition
+            val votes = poll.counted.values
+            return Tally(
+                definition = definition,
+                options = definition.options.map { option -> OptionResult(option.id, option.label, votes.count { option.id in it.second }) },
+                participants = votes.size,
+                selection = poll.counted[viewer.lowercase()]?.second ?: emptyList(),
+                isOpen = definition.endsAt == null || nowSeconds < definition.endsAt,
+            )
+        }
     }
 
     /** Kind 1068 tags for a poll whose options get the ids `0`, `1`, … in order, as cordn-web's do. */
@@ -232,9 +277,8 @@ object CordnPolls {
         return if (labels.isEmpty()) "Voted" else "Voted: ${labels.joinToString(", ")}"
     }
 
-    private val OPTION_ID = Regex("^[a-zA-Z0-9]{1,64}$")
-
-    private fun isOptionId(value: String): Boolean = OPTION_ID.matches(value)
+    /** `^[a-zA-Z0-9]{1,64}$`, without a regex: it runs for every option of every vote. */
+    private fun isOptionId(value: String): Boolean = value.length in 1..64 && value.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }
 
     private fun isSelectionShape(optionIds: List<String>): Boolean = optionIds.size in 1..MAX_OPTIONS && optionIds.all(::isOptionId) && optionIds.toSet().size == optionIds.size
 }

@@ -182,6 +182,36 @@ object CordnCalendar {
         return Rsvp(coordinate, tags.tagValue("e"), status)
     }
 
+    /**
+     * Kind 31925 tags answering [event] with [status], as cordn-web's `createCalendarRsvpTags`
+     * writes them: the `a` coordinate, the revision's `e`, a `d` of `rsvp-<d>` (one RSVP per
+     * account per event), `status`, the author's `p`, and an `alt`. The envelope's `content`
+     * should be [rsvpLabel]. [event] must be a valid calendar event ([isValidEvent]).
+     */
+    fun rsvpTags(
+        event: CordnEnvelope,
+        status: RsvpStatus,
+    ): TagArray {
+        require(isValidEvent(event.kind, event.content, event.tags)) { "not a calendar event every client accepts" }
+        val d = event.tags.tagValue("d")!!
+        return arrayOf(
+            arrayOf("a", coordinate(event.kind, event.pubKey, d)),
+            arrayOf("e", event.id, "", event.pubKey),
+            arrayOf("d", "rsvp-$d"),
+            arrayOf("status", status.wire),
+            arrayOf("p", event.pubKey),
+            arrayOf("alt", "RSVP: ${rsvpLabel(status)}"),
+        )
+    }
+
+    /** cordn-web's `CALENDAR_RSVP_LABELS`: what an RSVP says to a client that cannot read one. */
+    fun rsvpLabel(status: RsvpStatus): String =
+        when (status) {
+            RsvpStatus.ACCEPTED -> "Going"
+            RsvpStatus.TENTATIVE -> "Maybe"
+            RsvpStatus.DECLINED -> "Can't go"
+        }
+
     /** A `kind:author:d` naming a calendar event, normalised (lowercase author), or null. */
     private fun parseCoordinate(value: String): String? {
         val parts = value.split(':')
@@ -212,6 +242,8 @@ object CordnCalendar {
         val revisionCount = mutableMapOf<String, Int>()
         val cancellations = mutableMapOf<String, Long>()
         val invalid = mutableSetOf<HexKey>()
+        // Every valid calendar revision, latest or not.
+        val revisions = mutableListOf<HexKey>()
         // coordinate → account → its newest RSVP
         val rsvps = mutableMapOf<String, MutableMap<HexKey, Pair<CordnDeliveredMessage, RsvpStatus>>>()
 
@@ -235,21 +267,21 @@ object CordnCalendar {
                 return@forEach
             }
 
+            if (!CordnMessageKinds.isCalendarEvent(message.envelope.kind)) return@forEach
             val coordinate = coordinateOf(message)
             if (coordinate == null) {
-                if (CordnMessageKinds.isCalendarEvent(message.envelope.kind)) invalid += message.envelope.id
+                invalid += message.envelope.id
                 return@forEach
             }
+            revisions += message.envelope.id
             revisionCount[coordinate] = (revisionCount[coordinate] ?: 0) + 1
             val current = latest[coordinate]
             if (current == null || isNewer(message, current)) latest[coordinate] = message
         }
 
         val current = latest.values.mapTo(mutableSetOf()) { it.envelope.id }
-        val superseded =
-            messages
-                .filter { message -> coordinateOf(message) != null && message.envelope.id !in current }
-                .mapTo(mutableSetOf()) { it.envelope.id }
+        // From the first pass: re-running coordinateOf here validated every event twice.
+        val superseded = revisions.filterTo(mutableSetOf()) { it !in current }
         val revised = latest.filterKeys { (revisionCount[it] ?: 0) > 1 }.values.mapTo(mutableSetOf()) { it.envelope.id }
         val cancelled =
             latest

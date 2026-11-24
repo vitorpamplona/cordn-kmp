@@ -89,6 +89,20 @@ data class CordnCustomEmoji(
             url: String,
         ): Array<String> = arrayOf(TAG, name, url)
 
+        /**
+         * An `emoji-media` tag for [name], from the `imeta` [CordnMediaTag][com.vitorpamplona.cordn.appEncryptedMedia.CordnMediaTag]
+         * built for the encrypted picture: the same fields under the other tag name, with
+         * `name <name>` first, as cordn-web's `chatMediaStorage` writes it.
+         */
+        fun mediaTag(
+            name: String,
+            imeta: Array<String>,
+        ): Array<String> {
+            require(NAME.matches(name)) { "not a custom emoji name: $name" }
+            require(imeta.firstOrNull() == "imeta") { "not an imeta tag" }
+            return arrayOf(MEDIA_TAG, "name $name", *imeta.copyOfRange(1, imeta.size))
+        }
+
         private fun media(tag: Array<String>): Pair<String, CordnMediaAttachment>? {
             val fields =
                 tag

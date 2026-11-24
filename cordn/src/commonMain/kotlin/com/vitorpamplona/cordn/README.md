@@ -140,7 +140,8 @@ emoji tag; and the voice-note waveform was in a format each client discarded fro
    application message that arrives with it empty
    (`packages/cli/src/groupSync.ts:247`). The spec never mentions this; it is
    only in the reference implementation. Use `CordnApplicationMessage`, not
-   `MlsGroup.encrypt` directly. It also means the binding costs metadata: the
+   `MlsGroup.encrypt` directly. On receive the AAD must also equal the account the sender
+   leaf's credential names (divergence 10). It also means the binding costs metadata: the
    field is authenticated but not encrypted, so the coordinator — which holds
    every ciphertext — can read who sent what.
 
@@ -211,12 +212,24 @@ Plan §8 has the full analysis.
    cordn-web shows it. A removed member still holds the epoch they were removed
    from and could keep posting into the group until four Commits later; the
    retained epochs are for lagging senders, not departed ones.
-8. **A poll's deadline is judged by the vote's `created_at`.** cordn-web uses the
-   coordinator's receive time, which `CordnDeliveredMessage` does not keep, so a vote whose
-   sender backdated it past a closed poll counts here and not there (`CordnPolls`).
+8. **Two small app-event departures from cordn-web.** A message may carry several `imeta`
+   tags (NIP-92): cordn-web sends one file per message and draws only the first `imeta` of a
+   message that has more, showing "unsupported" when that first one has an unknown version;
+   `CordnMediaTag.parseAll` returns every attachment §4 accepts and Amethyst draws them all. And
+   two edits the coordinator received in the same millisecond: cordn-web compares `at` strictly
+   and keeps the first, where its own pins and votes break the tie on the cursor;
+   `CordnAnnotationIndex` keeps the edit sequenced last. Both are pinned by the app-event vectors.
+   (A poll's deadline used to be a third: it is now judged by the coordinator's receive time,
+   `CordnDeliveredMessage.receivedAt`, as cordn-web judges it.)
 9. **Unknown kinds.** cordn-web draws every message of a kind it does not know as a row, each
    revision of an addressable one and an empty one included; `CordnStreamRows` keeps NIP-01's
    newest revision and drops a blank row with no `alt`. `spec/02.md` §6 requires no kinds.
+10. **The sender is held to its leaf credential, not only to `authenticated_data`.** Both
+    reference clients read the sender from the AAD, which the sender writes, so a member can post
+    as anyone there; `spec/02.md` §5 derives it from the sender's MLS credential, and we refuse a
+    message whose AAD names anyone but the account its leaf's credential names (at the epoch it
+    was sealed at). Devices share their account's leaf (`multi-device.md` §2), so honest traffic
+    never differs. Plan: "The sender is the leaf credential's account", with the upstream note.
 
 ## Testing
 

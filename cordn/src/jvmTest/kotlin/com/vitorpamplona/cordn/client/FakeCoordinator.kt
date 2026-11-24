@@ -274,12 +274,14 @@ class FakeCoordinator(
         // Monotonic across the whole coordinator, which is stricter than
         // spec/00.md §4 requires (per group) and so a safe stand-in.
         val assigned = ++sequence.cursor
-        streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, assigned, sealedBase64, clock++)
+        val at = clock++
+        streams.getOrPut(gid) { mutableListOf() } += GroupMessage(gid, assigned, sealedBase64, at)
         if (storeThenFailNextPost) {
             storeThenFailNextPost = false
             throw IllegalStateException("msg_post timed out")
         }
-        return PostedMessage(gid, assigned, clock)
+        // The `at` it was filed under, which a fetch reports too.
+        return PostedMessage(gid, assigned, at)
     }
 
     override suspend fun fetchMessages(cursors: Map<String, Long?>): List<GroupMessage> {

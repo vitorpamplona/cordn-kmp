@@ -170,6 +170,14 @@ function viewOf(stream, me, now) {
     const target = attention.get(message.cursor);
     if (target) view.attention = target;
 
+    // What the row draws: cordn-web shows one attachment per message, the first `imeta` that
+    // parses (ChatMessageMedia via findImetaTag), and none when its version is unknown; it sends
+    // one file per message, but NIP-92 lets a message carry several.
+    if (message.tags.some((tag) => tag[0] === "imeta")) {
+      const first = findImetaTag(message.tags);
+      view.attachments = first && isKnownMediaVersion(first.version) ? [first.url] : [];
+    }
+
     const media = findImetaTag(message.tags);
     if (media) {
       view.media = isKnownMediaVersion(media.version)
@@ -482,6 +490,67 @@ theirs("media: an image and a voice note", BOB, (s) => {
   });
   s.send(ALICE, { kind: ChatKinds.Text, content: "from the future", tags: [["imeta", `url https://blossom.example/${HASH}`, "m image/png", "filename x.png", `x ${HASH}`, `n ${NONCE}`, "v cordn-em-v9"]] });
 });
+
+const photo = (n) =>
+  buildImetaTag({
+    url: `https://blossom.example/${String(n).repeat(64)}`,
+    mime: "image/jpeg",
+    filename: `photo-${n}.jpg`,
+    plaintextHashHex: String(n).repeat(64),
+    nonceHex: NONCE,
+    version: MEDIA_VERSION,
+    dim: "800x600",
+  });
+
+theirs(
+  "media: two attachments in one message",
+  BOB,
+  (s) => {
+    s.send(ALICE, { kind: ChatKinds.Text, content: "two photos", tags: [photo(1), photo(2)] });
+  },
+  "NIP-92 allows several imeta tags; cordn-web sends one file per message and draws only the first of a message that has more",
+);
+
+theirs(
+  "media: an unknown version before a supported attachment",
+  BOB,
+  (s) => {
+    const future = ["imeta", `url https://blossom.example/${HASH}`, "m image/png", "filename x.png", `x ${HASH}`, `n ${NONCE}`, "v cordn-em-v9"];
+    s.send(ALICE, { kind: ChatKinds.Text, content: "old and new", tags: [future, photo(3)] });
+  },
+  "encrypted-media.md §4 rejects the unknown-version imeta; cordn-web then shows the message's media as unsupported rather than the next one",
+);
+
+theirs(
+  "edit: two edits the coordinator received in the same millisecond",
+  BOB,
+  (s) => {
+    const original = s.send(ALICE, text("draft"));
+    const at = (T0 + 600) * 1000 + 7;
+    s.send(ALICE, resolveOutboundMessage({ content: "first fix", editTo: target(original) }), { at });
+    s.send(ALICE, resolveOutboundMessage({ content: "second fix", editTo: target(original) }), { at });
+  },
+  "cordn-web keeps the first edit on a receive-time tie (strict >, no cursor tie-break), where its pins and votes break ties on the cursor",
+);
+
+theirs(
+  "poll: a vote received after the deadline, backdated by its sender",
+  BOB,
+  (s) => {
+    // Hand-built: createPollMessageTags refuses a deadline that is not in the future of the
+    // generator's own clock.
+    const poll = s.send(ALICE, {
+      kind: ChatKinds.Poll,
+      content: "Lunch?",
+      tags: [["option", "0", "Yes"], ["option", "1", "No"], ["polltype", "singlechoice"], ["endsAt", String(T0 + 1_800)], ["alt", "Poll: Lunch?"]],
+    });
+    // Both written before the deadline by their senders' clocks; the second reached the
+    // coordinator after it.
+    s.send(BOB, resolveOutboundMessage({ content: "Voted: Yes", voteTo: { target: target(poll), optionIds: ["0"] } }), { createdAt: T0 + 1_700, at: (T0 + 1_700) * 1000 });
+    s.send(CAROL, resolveOutboundMessage({ content: "Voted: No", voteTo: { target: target(poll), optionIds: ["1"] } }), { createdAt: T0 + 1_750, at: (T0 + 1_801) * 1000 });
+  },
+  "cordn-web judges a poll's deadline by the coordinator's receive time (floor(at / 1000) > endsAt is late)",
+);
 
 const announcement = (overrides) => ({ callId: CALL_ID, service: "https://calls.example", status: "open", startsAt: T0 + 60, identitySecret: SECRET, title: "Design sync", ...overrides });
 const callShape = (a) => ({ kind: ChatKinds.Call, content: "", tags: createCallAnnouncementTags(a) });

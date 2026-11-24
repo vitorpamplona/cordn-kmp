@@ -78,6 +78,21 @@ class CordnAppEventVectorTest {
             // the newest revision per NIP-01 and drops a blank row that has no `alt` to show.
             "kinds cordn-web does not draw: every addressable revision and a blank one keep their rows" to
                 Divergence(setOf("row"), "CordnStreamRows: NIP-01 replacement and no blank rows for undrawn kinds"),
+            // NIP-92 lets a message carry several `imeta` tags. cordn-web sends one file per message
+            // and draws only the first of a message that has more; CordnMediaTag.parseAll returns
+            // every one, and Amethyst draws them all. README "divergences" #8.
+            "media: two attachments in one message" to
+                Divergence(setOf("attachments"), "NIP-92: a message may carry several imeta tags, and each is drawn"),
+            // encrypted-media.md §4: an unknown `v` is a rejection of that imeta. cordn-web then shows
+            // the message's media as unsupported; parseAll skips it and the next one is drawn.
+            "media: an unknown version before a supported attachment" to
+                Divergence(setOf("attachments", "media"), "encrypted-media.md §4 rejects only the unknown-version imeta"),
+            // Two edits with the same receive time (the coordinator's `at` is in ms, and two posts can
+            // share one). cordn-web compares `at` strictly and keeps the first; its pins and votes
+            // break such ties on the cursor, and so does CordnAnnotationIndex for edits: the one the
+            // coordinator sequenced last wins. README "divergences" #8.
+            "edit: two edits the coordinator received in the same millisecond" to
+                Divergence(setOf("edit"), "the edit sequenced last wins, as cordn-web's own pins and votes break ties"),
         )
 
     /**
@@ -89,9 +104,14 @@ class CordnAppEventVectorTest {
         listOf(
             Triple("mention: a nostr:npub in content", 0, "attention"),
             Triple("custom emoji reaction", 0, "custom_emoji"),
+            Triple("custom emoji reaction: encrypted emoji-media", 0, "custom_emoji"),
             Triple("reactions, and one taken back", 0, "reactions"),
             Triple("pin and unpin", 0, "pinned"),
             Triple("poll and votes", 0, "poll"),
+            Triple("poll: a vote received after the deadline, backdated by its sender", 0, "poll"),
+            Triple("media: two attachments in one message", 0, "attachments"),
+            Triple("calendar: RSVPs from our builder", 0, "calendar"),
+            Triple("edit: two edits the coordinator received in the same millisecond", 0, "edit"),
             Triple("deletion by the author", 0, "deleted"),
         )
 
@@ -163,7 +183,11 @@ class CordnAppEventVectorTest {
                 case["stream"]!!.jsonArray.map {
                     val delivered = it.jsonObject
                     // fromJsonObject recomputes the NIP-01 id: their ids must be ours too.
-                    CordnDeliveredMessage(CordnEnvelope.fromJsonObject(delivered["event"]!!.jsonObject), delivered["cursor"]!!.jsonPrimitive.long)
+                    CordnDeliveredMessage(
+                        CordnEnvelope.fromJsonObject(delivered["event"]!!.jsonObject),
+                        delivered["cursor"]!!.jsonPrimitive.long,
+                        receivedAt = delivered["at"]!!.jsonPrimitive.long,
+                    )
                 }
             val expected = case["expect"]!!.jsonObject
             val actual = CordnAppEventView.of(stream, viewer, now)

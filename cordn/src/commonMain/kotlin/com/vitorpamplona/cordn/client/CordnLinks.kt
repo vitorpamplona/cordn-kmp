@@ -21,6 +21,7 @@
 package com.vitorpamplona.cordn.client
 
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorClient
+import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.quartz.contextvm.cep04Encryption.CvmGiftWrap
 import com.vitorpamplona.quartz.contextvm.mcp.CvmMcpClient
 import com.vitorpamplona.quartz.contextvm.transport.CvmRelayPool
@@ -45,30 +46,32 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
  * a second front end is a second place those decisions can drift. Android, the
  * desktop app and `amy` all take this one.
  *
- * ## The ephemeral signer is created here, once, and never persisted
+ * ## One ephemeral signer per connection, never persisted
  *
  * `spec/00.md` §8 splits the identity a coordinator sees: the account key
  * signs what must be attributable (publishing a KeyPackage, posting to a
  * group), and a throwaway key signs everything else, so the coordinator cannot
  * link a session's reads to an account. Which key signs which call is fixed by
  * `CoordinatorMethod` and not a choice made here; what IS decided here is that
- * the throwaway key lives as long as this factory and no longer. Persisting it
- * would quietly undo the split — a "session" key reused across launches is
- * just a second account key with worse ergonomics.
+ * the throwaway key belongs to one connection to one coordinator and no more.
+ * One key across coordinators would let any two of them (or a relay carrying
+ * both) link the account's sessions on each, and the §8.2 model is per
+ * coordinator; persisting it would quietly undo the split, since a "session"
+ * key reused across launches is just a second account key with worse
+ * ergonomics.
  *
- * One consequence worth naming: a front end that builds a factory per run —
- * `amy` does, since every invocation is its own process — gets a fresh
- * throwaway key each time, which is the strong end of the split rather than a
- * degradation of it.
+ * A front end that builds a factory per run (`amy` does, since every
+ * invocation is its own process) gets a fresh throwaway key each time, which
+ * is the strong end of the split rather than a degradation of it.
  */
 object CordnLinks {
     fun over(
         accountSigner: NostrSigner,
         relayPool: (relays: Set<NormalizedRelayUrl>) -> CvmRelayPool,
-    ): CordnCoordinatorLinkFactory {
-        val ephemeralSigner = NostrSignerInternal(KeyPair())
-
-        return CordnCoordinatorLinkFactory { _, config ->
+    ): CordnCoordinatorLinkFactory =
+        CordnCoordinatorLinkFactory { _, config ->
+            // Per connection, so two coordinators never see the same pseudonym.
+            val ephemeralSigner = NostrSignerInternal(KeyPair())
             val transport =
                 CvmTransport(
                     relays = relayPool(config.relays.toSet()),
@@ -80,23 +83,26 @@ object CordnLinks {
                     crypto = CvmGiftWrap(),
                 )
 
+            val client = CoordinatorClient(CvmMcpClient(transport))
+            val closable = ClosableCoordinator(client)
+
             object : CordnCoordinatorLink {
-                override val coordinator = CoordinatorClient(CvmMcpClient(transport))
+                override val coordinator: ICoordinator = closable
 
                 // Handshaken on demand, not at open: `initialize` is a call
                 // like any other (§8), and a coordinator that only ever hears
                 // from us when we have something to say tells it less than one
                 // that is greeted at every launch.
-                override suspend fun serverInfo() = coordinator.serverInfo()
+                override suspend fun serverInfo() = client.serverInfo()
 
                 override suspend fun close() {
-                    // Nothing to release. CvmTransport opens a subscription
-                    // per request and closes it in the same call — kind 25910
-                    // is ephemeral, so there is no long-lived stream to tear
-                    // down and no connection of its own. The relays it used
-                    // belong to the shared client, which outlives this link.
+                    // CvmTransport opens a subscription per request and closes it
+                    // in the same call (kind 25910 is ephemeral), and the relays
+                    // belong to the shared client, which outlives this link. What
+                    // is left to stop is the calls themselves: those in flight are
+                    // cancelled, and later ones refused.
+                    closable.close()
                 }
             }
         }
-    }
 }

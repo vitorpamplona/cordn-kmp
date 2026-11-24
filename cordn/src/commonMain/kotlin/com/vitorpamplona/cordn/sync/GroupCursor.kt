@@ -98,7 +98,20 @@ sealed interface Ingestion {
     data class Process(
         override val cursor: Long,
         val sealedBase64: String,
-    ) : Ingestion
+        /** The coordinator's receive time for it, Unix ms ([GroupMessage.at]). */
+        val at: Long? = null,
+    ) : Ingestion {
+        /** The 1.6 constructor, kept so code compiled against it still links. */
+        @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
+        constructor(cursor: Long, sealedBase64: String) : this(cursor, sealedBase64, null)
+
+        /** The 1.6 `copy`, kept so code compiled against it still links. */
+        @Deprecated("Use copy with at.", level = DeprecationLevel.HIDDEN)
+        fun copy(
+            cursor: Long = this.cursor,
+            sealedBase64: String = this.sealedBase64,
+        ): Process = Process(cursor, sealedBase64, at)
+    }
 }
 
 /**
@@ -282,7 +295,7 @@ class GroupInbox(
             return Ingestion.OwnMessage(message.cursor)
         }
 
-        return Ingestion.Process(message.cursor, message.sealedBase64)
+        return Ingestion.Process(message.cursor, message.sealedBase64, message.at)
     }
 
     /**

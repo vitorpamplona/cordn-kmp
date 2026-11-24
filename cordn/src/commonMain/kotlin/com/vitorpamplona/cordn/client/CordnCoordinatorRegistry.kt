@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.cordn.client
 
+import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorException
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorServerInfo
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
 
 /**
  * Everything one account needs to talk to one coordinator.
@@ -157,7 +159,24 @@ class CordnSession(
         keyPackageRef: String? = null,
     ): Long = manager.requestToJoin(gid, keyPackageRef ?: keyPackages.publishNew().keyPackageRef)
 
-    internal suspend fun close() = scope.close()
+    /**
+     * Quiesces the manager (see [CordnGroupManager.close]) and closes the transport under it.
+     *
+     * In that order of effect but not of calls: new work is refused first, then the transport
+     * closes, then the group locks are taken and everything saved. An operation holds its
+     * group's lock across its coordinator calls (a send's post, a Commit's read to the end), and
+     * a call that never answers ends only when its transport does, as a [CoordinatorException];
+     * taking the locks first waited on it forever, and with the registry's lock held, every
+     * other coordinator with it.
+     */
+    internal suspend fun close() {
+        manager.refuseNewWork()
+        try {
+            scope.close()
+        } finally {
+            manager.close()
+        }
+    }
 }
 
 /**
@@ -203,7 +222,13 @@ class CordnCoordinatorRegistry(
     private val handoff: CordnHandoffState? = null,
 ) {
     private val lock = Mutex()
+
+    /** Written under [lock] only. */
     private val sessions = mutableMapOf<HexKey, CordnSession>()
+
+    /** A copy of [sessions] for readers outside [lock], replaced whole by [publish]. */
+    @Volatile
+    private var published: Map<HexKey, CordnSession> = emptyMap()
 
     private val _coordinators = MutableStateFlow<List<CoordinatorConfig>>(emptyList())
 
@@ -248,7 +273,21 @@ class CordnCoordinatorRegistry(
         }
 
     /** The session for [coordinatorPubKey], or null if none is open. */
-    fun sessionOrNull(coordinatorPubKey: HexKey): CordnSession? = sessions[coordinatorPubKey]
+    fun sessionOrNull(coordinatorPubKey: HexKey): CordnSession? = published[coordinatorPubKey]
+
+    /**
+     * Runs [block] while the open session for [coordinatorPubKey], if any, leaves [gid] alone
+     * ([CordnGroupManager.whileIdle]). The guard [CordnLocalState.read] wants:
+     * `CordnLocalState.read(coordinators, registry::whileIdle) { storesFor(it) }`.
+     */
+    suspend fun whileIdle(
+        coordinatorPubKey: HexKey,
+        gid: String,
+        block: suspend () -> Unit,
+    ) {
+        val manager = sessionOrNull(coordinatorPubKey)?.manager
+        if (manager == null) block() else manager.whileIdle(gid, block)
+    }
 
     /**
      * Restores sessions for [configs] and closes any coordinator not in it.
@@ -344,27 +383,35 @@ class CordnCoordinatorRegistry(
     ): CordnSession {
         // Same coordinator, different address or label. The transport is bound
         // to the relays, so it is reopened; the stores are not, so the groups
-        // and published KeyPackages survive untouched.
-        existing.close()
+        // and published KeyPackages survive untouched. The old manager is
+        // quiesced first (every group saved, every later call refused), so the
+        // new one restores what the old one last held and nothing the old one
+        // does afterwards can land over it.
         sessions.remove(config.pubKey)
+        publish()
+        existing.close()
         return open(config).also { publish() }
     }
 
     private suspend fun open(config: CoordinatorConfig): CordnSession {
         val scope = scopes.open(accountPubKey, config)
         val health = CoordinatorHealth()
+        val keyPackages = CordnKeyPackages(accountPubKey, scope.coordinator, scope.keyPackageStore)
+        val manager =
+            CordnGroupManager(
+                accountPubKey = accountPubKey,
+                config = config,
+                coordinator = scope.coordinator,
+                store = scope.groupStore,
+                health = health,
+            )
+        // A Welcome answered is a single-use KeyPackage whose private half has no use left.
+        manager.onKeyPackageSpent = keyPackages::spent
         val session =
             CordnSession(
                 config = config,
-                manager =
-                    CordnGroupManager(
-                        accountPubKey = accountPubKey,
-                        config = config,
-                        coordinator = scope.coordinator,
-                        store = scope.groupStore,
-                        health = health,
-                    ),
-                keyPackages = CordnKeyPackages(accountPubKey, scope.coordinator, scope.keyPackageStore),
+                manager = manager,
+                keyPackages = keyPackages,
                 health = health,
                 scope = scope,
             )
@@ -374,14 +421,22 @@ class CordnCoordinatorRegistry(
         // epoch zero against a coordinator that is not there. Forgetting to
         // call this would look like "my groups are gone", which is also what a
         // real failure looks like.
-        session.manager.restore()
-        session.keyPackages.restore()
+        try {
+            session.manager.restore()
+            session.keyPackages.restore()
+        } catch (e: Exception) {
+            // Not a session, so nothing else will close what was opened for it: every retry
+            // would leave another transport behind.
+            scope.close()
+            throw e
+        }
 
         sessions[config.pubKey] = session
         return session
     }
 
     private fun publish() {
+        published = sessions.toMap()
         _coordinators.value = sessions.values.map { it.config }
     }
 }

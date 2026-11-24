@@ -70,12 +70,14 @@ One file per direction, an array of cases. A case is a small group stream:
   "stream": [ { "cursor": 1, "at": 1767225660250, "event": { "id": "...", "pubkey": "...", "created_at": 0, "kind": 9, "tags": [], "content": "..." } } ],
   "expect": { "<event id>": { "row": true, "reply": {"root": "...", "parent": "..."}, "edit": "...", "deleted": true,
       "pinned": true, "reactions": {"👍": ["<pubkey>"]}, "custom_emoji": {":x:": {"name": "x", "url": "..."}},
-      "mentions": ["<pubkey>"], "attention": "<row id a p tag to `me` lights up>", "media": {...} | "unsupported",
+      "mentions": ["<pubkey>"], "attention": "<row id a p tag to `me` lights up>",
+      "attachments": ["<url of each attachment the row draws>"], "media": {...} | "unsupported",
       "call": {...} | "unsupported", "calendar": {...} | "unsupported", "poll": {...} | "unsupported" } } }
 ```
 
-`at` is the coordinator's receive time (ms): cordn-web orders edits, pins and votes by it, and
-it rises with the cursor. A field is omitted when it has nothing to say. Where cordn-web departs
+`at` is the coordinator's receive time (ms): cordn-web orders edits, pins and votes by it and
+judges a poll's deadline by it, and it rises with the cursor; cordn-kmp reads it as
+`CordnDeliveredMessage.receivedAt`. Two messages may share one (a coordinator's clock is in ms). A field is omitted when it has nothing to say. Where cordn-web departs
 from the spec and cordn-kmp keeps the spec, the test lists the case and the fields with the
 reason, and fails once they agree again.
 

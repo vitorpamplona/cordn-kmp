@@ -2330,6 +2330,9 @@
    "expect": {
     "0cffa04f5f66753d13fba7bd07fcc7038309fb1c4d707328345e5ceadfef22c4": {
      "row": true,
+     "attachments": [
+      "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+     ],
      "media": {
       "url": "https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
       "mime": "image/jpeg",
@@ -2344,6 +2347,9 @@
     },
     "7d6b911aff391e67792b635dd7342cc12862cac027411103826e8247cc3f5a47": {
      "row": true,
+     "attachments": [
+      "https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b"
+     ],
      "media": {
       "url": "https://blossom.example/7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
       "mime": "audio/webm",
@@ -2361,7 +2367,348 @@
     },
     "d49731c9e128bb0d7e3faf3adade196514391a8b522c5caa9557005073dfcae5": {
      "row": true,
+     "attachments": [],
      "media": "unsupported"
+    }
+   }
+  },
+  {
+   "name": "media: two attachments in one message",
+   "source": "cordn-web 0.7.0 (949dfdf)",
+   "note": "NIP-92 allows several imeta tags; cordn-web sends one file per message and draws only the first of a message that has more",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "8430c363cb53c5f9d0ff9bcb7edeba7e97ceea1bf36925399a9087dbe3001f4c",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [
+       [
+        "imeta",
+        "url https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111",
+        "m image/jpeg",
+        "filename photo-1.jpg",
+        "x 1111111111111111111111111111111111111111111111111111111111111111",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 800x600"
+       ],
+       [
+        "imeta",
+        "url https://blossom.example/2222222222222222222222222222222222222222222222222222222222222222",
+        "m image/jpeg",
+        "filename photo-2.jpg",
+        "x 2222222222222222222222222222222222222222222222222222222222222222",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 800x600"
+       ]
+      ],
+      "content": "two photos"
+     }
+    }
+   ],
+   "expect": {
+    "8430c363cb53c5f9d0ff9bcb7edeba7e97ceea1bf36925399a9087dbe3001f4c": {
+     "row": true,
+     "attachments": [
+      "https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111"
+     ],
+     "media": {
+      "url": "https://blossom.example/1111111111111111111111111111111111111111111111111111111111111111",
+      "mime": "image/jpeg",
+      "filename": "photo-1.jpg",
+      "x": "1111111111111111111111111111111111111111111111111111111111111111",
+      "n": "0c0c0c0c0c0c0c0c0c0c0c0c",
+      "dim": "800x600"
+     }
+    }
+   }
+  },
+  {
+   "name": "media: an unknown version before a supported attachment",
+   "source": "cordn-web 0.7.0 (949dfdf)",
+   "note": "encrypted-media.md §4 rejects the unknown-version imeta; cordn-web then shows the message's media as unsupported rather than the next one",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "81dd1e4a536025456241db2c4335d9b215d3fd252a803a2d986225c53f7f721e",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [
+       [
+        "imeta",
+        "url https://blossom.example/5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "m image/png",
+        "filename x.png",
+        "x 5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v9"
+       ],
+       [
+        "imeta",
+        "url https://blossom.example/3333333333333333333333333333333333333333333333333333333333333333",
+        "m image/jpeg",
+        "filename photo-3.jpg",
+        "x 3333333333333333333333333333333333333333333333333333333333333333",
+        "n 0c0c0c0c0c0c0c0c0c0c0c0c",
+        "v cordn-em-v1",
+        "dim 800x600"
+       ]
+      ],
+      "content": "old and new"
+     }
+    }
+   ],
+   "expect": {
+    "81dd1e4a536025456241db2c4335d9b215d3fd252a803a2d986225c53f7f721e": {
+     "row": true,
+     "attachments": [],
+     "media": "unsupported"
+    }
+   }
+  },
+  {
+   "name": "edit: two edits the coordinator received in the same millisecond",
+   "source": "cordn-web 0.7.0 (949dfdf)",
+   "note": "cordn-web keeps the first edit on a receive-time tie (strict >, no cursor tie-break), where its pins and votes break ties on the cursor",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 9,
+      "tags": [],
+      "content": "draft"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767226200007,
+     "event": {
+      "id": "73b2b48628effae6b513d094f4ed6f61448be0c27c1d0d8b94ccac5baa44efd0",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225720,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "first fix"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767226200007,
+     "event": {
+      "id": "393754c53cb3d5867e8b72da3fea9e948fb17ba221c2a5fed42c23a3fa6bb46a",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225780,
+      "kind": 1010,
+      "tags": [
+       [
+        "e",
+        "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "9"
+       ]
+      ],
+      "content": "second fix"
+     }
+    }
+   ],
+   "expect": {
+    "7c9408426e8e09db5c6db58da64a668a72dfab1602b36e898d4250f56dd63787": {
+     "row": true,
+     "edit": "first fix"
+    },
+    "73b2b48628effae6b513d094f4ed6f61448be0c27c1d0d8b94ccac5baa44efd0": {
+     "row": false
+    },
+    "393754c53cb3d5867e8b72da3fea9e948fb17ba221c2a5fed42c23a3fa6bb46a": {
+     "row": false
+    }
+   }
+  },
+  {
+   "name": "poll: a vote received after the deadline, backdated by its sender",
+   "source": "cordn-web 0.7.0 (949dfdf)",
+   "note": "cordn-web judges a poll's deadline by the coordinator's receive time (floor(at / 1000) > endsAt is late)",
+   "me": "b0b0000000000000000000000000000000000000000000000000000000000000",
+   "now": 1767229200,
+   "stream": [
+    {
+     "cursor": 1,
+     "at": 1767225660250,
+     "event": {
+      "id": "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+      "pubkey": "a11ce00000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767225660,
+      "kind": 1068,
+      "tags": [
+       [
+        "option",
+        "0",
+        "Yes"
+       ],
+       [
+        "option",
+        "1",
+        "No"
+       ],
+       [
+        "polltype",
+        "singlechoice"
+       ],
+       [
+        "endsAt",
+        "1767227400"
+       ],
+       [
+        "alt",
+        "Poll: Lunch?"
+       ]
+      ],
+      "content": "Lunch?"
+     }
+    },
+    {
+     "cursor": 2,
+     "at": 1767227300000,
+     "event": {
+      "id": "1d465f74b9e75ae903b26e49a087fded67f17d8d26e2033d69f607770222c905",
+      "pubkey": "b0b0000000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767227300,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "0"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: Yes"
+     }
+    },
+    {
+     "cursor": 3,
+     "at": 1767227401000,
+     "event": {
+      "id": "00854b7131de352909cc4364271a7e78bce81fdb604568d3906ceaaf974d9ad5",
+      "pubkey": "ca20100000000000000000000000000000000000000000000000000000000000",
+      "created_at": 1767227350,
+      "kind": 1018,
+      "tags": [
+       [
+        "e",
+        "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4",
+        "",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "p",
+        "a11ce00000000000000000000000000000000000000000000000000000000000"
+       ],
+       [
+        "k",
+        "1068"
+       ],
+       [
+        "response",
+        "1"
+       ],
+       [
+        "alt",
+        "Poll vote"
+       ]
+      ],
+      "content": "Voted: No"
+     }
+    }
+   ],
+   "expect": {
+    "3587960a38de9ac9294c8d7509ed4dcc341050f9afd738306c6d49c52cd159b4": {
+     "row": true,
+     "poll": {
+      "question": "Lunch?",
+      "type": "singlechoice",
+      "ends_at": 1767227400,
+      "open": false,
+      "options": [
+       {
+        "id": "0",
+        "label": "Yes",
+        "votes": 1
+       },
+       {
+        "id": "1",
+        "label": "No",
+        "votes": 0
+       }
+      ],
+      "participants": 1,
+      "selection": [
+       "0"
+      ]
+     }
+    },
+    "1d465f74b9e75ae903b26e49a087fded67f17d8d26e2033d69f607770222c905": {
+     "row": false
+    },
+    "00854b7131de352909cc4364271a7e78bce81fdb604568d3906ceaaf974d9ad5": {
+     "row": false
     }
    }
   },
