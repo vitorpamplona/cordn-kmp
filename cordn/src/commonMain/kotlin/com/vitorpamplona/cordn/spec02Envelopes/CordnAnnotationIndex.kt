@@ -57,7 +57,7 @@ data class CordnDeliveredMessage(
 ) {
     /** The 1.6 constructor, kept so code compiled against it still links. */
     @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
-    constructor(envelope: CordnEnvelope, cursor: Long, mediaKey: ByteArray?) : this(envelope, cursor, mediaKey, null)
+    constructor(envelope: CordnEnvelope, cursor: Long, mediaKey: ByteArray? = null) : this(envelope, cursor, mediaKey, null)
 
     /** The 1.6 `copy`, kept so code compiled against it still links. */
     @Deprecated("Use copy with receivedAt.", level = DeprecationLevel.HIDDEN)

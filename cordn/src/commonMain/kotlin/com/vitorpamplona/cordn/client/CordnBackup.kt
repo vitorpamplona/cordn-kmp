@@ -173,7 +173,7 @@ object CordnBackup {
                 state: ByteArray,
                 cursor: GroupCursor?,
                 joinedViaRequest: Boolean,
-                messages: List<CordnDeliveredMessage>,
+                messages: List<CordnDeliveredMessage> = emptyList(),
             ) : this(coordinatorPubKey, gid, state, cursor, joinedViaRequest, messages, null)
 
             /** The 1.6 `copy`, kept so code compiled against it still links. */

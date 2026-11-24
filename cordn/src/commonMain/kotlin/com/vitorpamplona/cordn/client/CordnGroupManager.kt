@@ -174,7 +174,16 @@ class CordnGroupManager(
         ) : Delivery {
             /** The 1.6 constructor, kept so code compiled against it still links. */
             @Deprecated("Use the primary constructor.", level = DeprecationLevel.HIDDEN)
-            constructor(gid: String, cursor: Long, received: ReceivedMessage, mediaKey: ByteArray?) : this(gid, cursor, received, mediaKey, null)
+            constructor(gid: String, cursor: Long, received: ReceivedMessage, mediaKey: ByteArray? = null) : this(gid, cursor, received, mediaKey, null)
+
+            /** The 1.6 `copy`, kept so code compiled against it still links. */
+            @Deprecated("Use copy with receivedAt.", level = DeprecationLevel.HIDDEN)
+            fun copy(
+                gid: String = this.gid,
+                cursor: Long = this.cursor,
+                received: ReceivedMessage = this.received,
+                mediaKey: ByteArray? = this.mediaKey,
+            ): Message = Message(gid, cursor, received, mediaKey, receivedAt)
 
             /** The message as the store and a room hold it. */
             val delivered: CordnDeliveredMessage get() = CordnDeliveredMessage(received.envelope, cursor, mediaKey, receivedAt)
