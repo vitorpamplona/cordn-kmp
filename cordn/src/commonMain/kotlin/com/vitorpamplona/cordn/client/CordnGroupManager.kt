@@ -1805,6 +1805,13 @@ class CordnGroupManager(
             // Application messages only: a Commit from a former epoch is one
             // that lost to the Commit we applied, and MLS refuses it.
             val decrypted = group.decryptFormerEpoch(opened)
+            // MLS read it against the tree of the epoch inside it; the seal is another epoch's.
+            // Both are the same epoch by construction (spec/03.md §5), so a mismatch is no
+            // client's message, and keying its sender or media by the seal's epoch would pair
+            // one epoch's leaf index with another's tree.
+            if (decrypted.epoch != epoch) {
+                return emit(Delivery.Undecryptable(gid, cursor, "sealed at former epoch $epoch around an epoch ${decrypted.epoch} message"))
+            }
             // A member of the epoch it was sealed at, by that epoch's tree; and still holding that
             // leaf now, or it is someone a later Commit removed (or whose leaf went to someone else).
             val sealedBy = keys.formerIdentities.getOrPut(epoch) { CordnCredential.membersAt(group, epoch) }?.get(decrypted.senderLeafIndex)

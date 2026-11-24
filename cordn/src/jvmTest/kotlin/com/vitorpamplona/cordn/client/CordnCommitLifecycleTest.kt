@@ -24,7 +24,9 @@ import com.vitorpamplona.cordn.appEncryptedMedia.CordnMediaEncryption
 import com.vitorpamplona.cordn.groups.CordnCredential
 import com.vitorpamplona.cordn.groups.CordnGroupPolicy
 import com.vitorpamplona.cordn.spec01GroupMetadata.CordnGroupMetadata
+import com.vitorpamplona.cordn.spec02Envelopes.CordnApplicationMessage
 import com.vitorpamplona.cordn.spec02Envelopes.CordnDeliveredMessage
+import com.vitorpamplona.cordn.spec02Envelopes.CordnEnvelope
 import com.vitorpamplona.cordn.spec03Payloads.SealedPayload
 import com.vitorpamplona.cordn.sync.EchoState
 import com.vitorpamplona.cordn.sync.GroupCursor
@@ -704,5 +706,29 @@ class CordnCommitLifecycleTest {
             assertEquals(listOf(gid), second.joined, "skipped: ${second.skipped}")
             assertEquals(listOf(bobStored.keyPackageRef), spent)
             assertNotNull(bobStore.inner.loadGroup(gid))
+        }
+
+    @Test
+    fun `a former-epoch message sealed under another epoch's key is refused`() =
+        runTest {
+            val g = aliceAndBob()
+            // Bob frames a message at epoch 1 and keeps the MLS bytes.
+            val bobAtOne = g.bob.group(gid)!!
+            val envelope = CordnEnvelope.build(bob, 1_757_000_000L, CordnGroupManager.CHAT_KIND, content = "out of place")
+            val atOne = SealedPayload.open(CordnApplicationMessage.seal(bobAtOne, bob, envelope), SealedPayload.applicationKey(bobAtOne))
+
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "two") }
+            val keyAtTwo = SealedPayload.applicationKey(g.alice.group(gid)!!)
+            g.alice.updateGroupMetadata(gid) { it.copy(name = "three") }
+            assertEquals(3L, g.alice.group(gid)!!.epoch)
+
+            // Epoch 1's MLS message under epoch 2's seal: no client builds one, and reading it
+            // would key its sender and its media by epoch 2.
+            g.coordinator.inject(gid, SealedPayload.seal(atOne, keyAtTwo))
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            g.alice.catchUp { delivered += it }
+
+            assertTrue(delivered.none { it is CordnGroupManager.Delivery.Message }, "shown: $delivered")
+            assertTrue(g.alice.storedMessages(gid).isEmpty())
         }
 }
