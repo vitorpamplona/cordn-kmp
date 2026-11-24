@@ -23,6 +23,7 @@ package com.vitorpamplona.cordn.client
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorException
 import com.vitorpamplona.cordn.spec00Coordinator.GroupMessage
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
+import com.vitorpamplona.cordn.spec00Coordinator.PostedMessage
 import com.vitorpamplona.cordn.spec01GroupMetadata.CordnGroupMetadata
 import com.vitorpamplona.quartz.contextvm.transport.CvmRelayPool
 import com.vitorpamplona.quartz.contextvm.transport.CvmSubscription
@@ -32,6 +33,7 @@ import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
@@ -177,5 +179,61 @@ class CordnSessionLifecycleTest {
             assertTrue(call.isCompleted)
             assertIs<CoordinatorException>(failure, "a closed link's call must fail as a coordinator failure, not cancel its caller")
             assertFailsWith<CoordinatorException> { link.coordinator.fetchMessages(mapOf(gid to null)) }
+        }
+
+    /** A coordinator whose posts hang until its transport closes, then fail as a closed link's do. */
+    private class HangingCoordinator(
+        val inner: FakeCoordinator,
+    ) : ICoordinator by inner {
+        val closed = CompletableDeferred<Unit>()
+        var hangPosts = false
+
+        override suspend fun postMessage(
+            gid: String,
+            sealedBase64: String,
+        ): PostedMessage {
+            if (hangPosts) {
+                closed.await()
+                throw CoordinatorException("the link was closed")
+            }
+            return inner.postMessage(gid, sealedBase64)
+        }
+    }
+
+    @Test
+    fun `forgetting a coordinator does not wait on a call only its transport close ends`() =
+        runTest {
+            val hanging = HangingCoordinator(FakeCoordinator(callerPubKey = account))
+            val store = InMemoryCordnGroupStore()
+            val factory =
+                CordnCoordinatorScopeFactory { _, _ ->
+                    object : CordnCoordinatorScope {
+                        override val coordinator: ICoordinator = hanging
+                        override val groupStore: CordnGroupStore = store
+                        override val keyPackageStore: CordnKeyPackageStore = InMemoryCordnKeyPackageStore()
+
+                        override suspend fun close() {
+                            hanging.closed.complete(Unit)
+                        }
+                    }
+                }
+            val registry = CordnCoordinatorRegistry(account, factory)
+            val manager = registry.session(config).manager
+            manager.createGroup(gid, CordnGroupMetadata(name = "kept"))
+
+            // A send holds the group's lock across its post, which never answers.
+            hanging.hangPosts = true
+            var sendFailure: Throwable? = null
+            val send = launch { sendFailure = runCatching { manager.send(gid, "stuck") }.exceptionOrNull() }
+            runCurrent()
+            assertTrue(send.isActive)
+
+            val forget = launch { registry.forget(coordinatorKey) }
+            runCurrent()
+            assertTrue(forget.isCompleted, "forget waited on a group lock held across a call only the transport close ends")
+            assertTrue(send.isCompleted)
+            assertIs<CoordinatorException>(sendFailure)
+            assertNotNull(store.loadGroup(gid), "the group was saved on the way out")
+            assertFailsWith<CordnGroupException> { manager.send(gid, "after") }
         }
 }

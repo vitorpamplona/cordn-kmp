@@ -20,6 +20,7 @@
  */
 package com.vitorpamplona.cordn.client
 
+import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorException
 import com.vitorpamplona.cordn.spec00Coordinator.CoordinatorServerInfo
 import com.vitorpamplona.cordn.spec00Coordinator.ICoordinator
 import com.vitorpamplona.quartz.nip01Core.core.HexKey
@@ -158,12 +159,22 @@ class CordnSession(
         keyPackageRef: String? = null,
     ): Long = manager.requestToJoin(gid, keyPackageRef ?: keyPackages.publishNew().keyPackageRef)
 
-    /** Quiesces the manager (see [CordnGroupManager.close]), then closes the transport under it. */
+    /**
+     * Quiesces the manager (see [CordnGroupManager.close]) and closes the transport under it.
+     *
+     * In that order of effect but not of calls: new work is refused first, then the transport
+     * closes, then the group locks are taken and everything saved. An operation holds its
+     * group's lock across its coordinator calls (a send's post, a Commit's read to the end), and
+     * a call that never answers ends only when its transport does, as a [CoordinatorException];
+     * taking the locks first waited on it forever, and with the registry's lock held, every
+     * other coordinator with it.
+     */
     internal suspend fun close() {
+        manager.refuseNewWork()
         try {
-            manager.close()
-        } finally {
             scope.close()
+        } finally {
+            manager.close()
         }
     }
 }

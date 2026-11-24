@@ -1921,8 +1921,18 @@ class CordnGroupManager(
      * touches a group throws, and the save at the end of a subscription does nothing.
      */
     suspend fun close() {
-        closed = true
+        refuseNewWork()
         gidList().forEach { gid -> lockOf(gid).withLock { persistQuietly(gid) } }
+    }
+
+    /**
+     * The first half of [close]: every later call that touches a group refuses, and nothing
+     * waits. For a session that must close the transport before it can take the group locks:
+     * an operation holds its group's lock across its coordinator calls, and a call that never
+     * answers only ends when the transport under it closes.
+     */
+    internal fun refuseNewWork() {
+        closed = true
     }
 
     /**
