@@ -1118,17 +1118,39 @@ class CordnGroupManager(
             requireRestorable(welcome.gid)
             val removed = groups[welcome.gid]
             require(removed == null || !removed.group.isLocalMember()) { "already in a group with gid ${welcome.gid}" }
+            val inbox = sync.inbox(welcome.gid)
+            val cursorBefore = inbox.cursor
+            val echoesBefore = inbox.echoes()
 
-            groups[welcome.gid] = Slot(welcome.group)
-            // Back in a group this account was removed from: the old membership's echo
-            // record and unopenable count say nothing about the new one. The cursor stays,
-            // so what was already read is not offered again.
-            if (removed != null) sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor)
-            // `after` is the inviter saying where this member's history starts.
-            // Without it a joiner replays epochs from before it existed and
-            // every one lands as Undecryptable.
-            welcome.after?.let { sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor.advancedTo(it)) }
-            persist(welcome.gid)
+            try {
+                groups[welcome.gid] = Slot(welcome.group)
+                // Back in a group this account was removed from: the old membership's echo
+                // record and unopenable count say nothing about the new one. The cursor stays,
+                // so what was already read is not offered again.
+                if (removed != null) sync.restore(welcome.gid, cursorBefore)
+                // `after` is the inviter saying where this member's history starts.
+                // Without it a joiner replays epochs from before it existed and
+                // every one lands as Undecryptable.
+                welcome.after?.let { sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor.advancedTo(it)) }
+                persist(welcome.gid)
+            } catch (e: Throwable) {
+                // Not joined until it is saved. A slot left installed would make the next
+                // pendingWelcomes retire this Welcome and spend its KeyPackage as stale, and
+                // the group would be gone at the next restart. Cancellation included: the
+                // save may not have happened either.
+                if (removed != null) {
+                    // Whatever part of the new state reached the store is overwritten by the
+                    // next save, so the store and this manager agree on the old one again.
+                    removed.dirty = true
+                    removed.savedCursor = null
+                    removed.savedEcho = null
+                    groups[welcome.gid] = removed
+                } else {
+                    groups.remove(welcome.gid)
+                }
+                sync.restore(welcome.gid, cursorBefore, echoesBefore)
+                throw e
+            }
         }
         publishGids()
 

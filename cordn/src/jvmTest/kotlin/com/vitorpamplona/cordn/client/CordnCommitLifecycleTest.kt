@@ -46,6 +46,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -346,6 +347,7 @@ class CordnCommitLifecycleTest {
         var dieAtNextCursor = false
         var dead = false
         var failNextAppend = false
+        var failNextSaveGroup = false
 
         private fun check() {
             if (dead) throw IllegalStateException("the process is gone")
@@ -368,6 +370,10 @@ class CordnCommitLifecycleTest {
             state: ByteArray,
         ) {
             check()
+            if (failNextSaveGroup) {
+                failNextSaveGroup = false
+                throw IllegalStateException("keystore locked")
+            }
             inner.saveGroup(gid, state)
         }
 
@@ -671,5 +677,32 @@ class CordnCommitLifecycleTest {
                 delivered.filterIsInstance<CordnGroupManager.Delivery.Message>().map { it.received.envelope.content },
                 "got ${delivered.map { it::class.simpleName }}",
             )
+        }
+
+    @Test
+    fun `a join whose save fails leaves no group behind and the Welcome open`() =
+        runTest {
+            val coordinator = FakeCoordinator(callerPubKey = alice)
+            val aliceManager = manager(alice, coordinator)
+            val (bobBundle, bobStored) = publication(bobSigner, "bb".repeat(16))
+            coordinator.seedKeyPackage(bobStored)
+            aliceManager.createGroup(gid, CordnGroupMetadata(name = "keep me"))
+            aliceManager.invite(gid, bob)
+
+            val bobStore = DyingStore().apply { failNextSaveGroup = true }
+            val bobManager = manager(bob, coordinator.viewAs(bob), bobStore)
+            val spent = mutableListOf<String>()
+            bobManager.onKeyPackageSpent = { spent += it }
+
+            val first = bobManager.joinPendingWelcomes({ bobBundle })
+            assertTrue(first.joined.isEmpty())
+            assertNull(bobManager.group(gid), "an unsaved group was left installed")
+            assertTrue(bobManager.gids.value.isEmpty())
+            assertTrue(spent.isEmpty(), "the KeyPackage was spent on a join that did not happen")
+
+            val second = bobManager.joinPendingWelcomes({ bobBundle })
+            assertEquals(listOf(gid), second.joined, "skipped: ${second.skipped}")
+            assertEquals(listOf(bobStored.keyPackageRef), spent)
+            assertNotNull(bobStore.inner.loadGroup(gid))
         }
 }
