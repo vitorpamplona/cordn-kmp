@@ -348,28 +348,35 @@ class CordnGroupManager(
      *
      * One group at a time: a group whose saved state does not decode is reported in
      * [unrestorable] and the others are restored all the same, rather than one bad blob taking
-     * every group on the coordinator down with it.
+     * every group on the coordinator down with it. A store that fails to read throws instead,
+     * so the caller can retry once it opens.
      */
     suspend fun restore() {
         store.listGroups().forEach { gid ->
-            try {
-                withGroup(gid) {
-                    val blob = store.loadGroup(gid) ?: return@withGroup
-                    val slot = Slot(MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)).apply { dirty = false }
-                    store.loadCursor(gid)?.let { cursor ->
-                        val echoes = store.loadEchoState(gid)
-                        sync.restore(gid, cursor, echoes)
-                        slot.savedCursor = cursor
-                        slot.savedEcho = echoes
+            withGroup(gid) {
+                // A store that cannot be read (a keystore not unlocked yet, a disk error) throws
+                // out of here: that is no verdict on the group, and a retry may read it. Only
+                // bytes that were read and do not decode make a group unrestorable.
+                val blob = store.loadGroup(gid) ?: return@withGroup
+                val group =
+                    try {
+                        MlsGroup.restore(MlsGroupState.decodeTls(blob), CordnGroupPolicy)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "could not restore $gid; left in the store as it is", e)
+                        _unrestorable.value += gid to (e.message ?: e::class.simpleName ?: "unreadable")
+                        return@withGroup
                     }
-                    groups[gid] = slot
+                val slot = Slot(group).apply { dirty = false }
+                store.loadCursor(gid)?.let { cursor ->
+                    val echoes = store.loadEchoState(gid)
+                    sync.restore(gid, cursor, echoes)
+                    slot.savedCursor = cursor
+                    slot.savedEcho = echoes
                 }
+                groups[gid] = slot
                 if (gid in _unrestorable.value) _unrestorable.value -= gid
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "could not restore $gid; left in the store as it is", e)
-                _unrestorable.value += gid to (e.message ?: e::class.simpleName ?: "unreadable")
             }
         }
         publishGids()

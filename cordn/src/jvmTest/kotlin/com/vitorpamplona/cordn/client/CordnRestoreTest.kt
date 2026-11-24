@@ -85,4 +85,25 @@ class CordnRestoreTest {
             assertEquals(3, closed, "each failed open left its transport behind")
             assertTrue(registry.coordinators.value.isEmpty())
         }
+
+    @Test
+    fun `a store that cannot be read yet fails the restore instead of marking groups unreadable`() =
+        runTest {
+            val inner = storeWithABadGroup()
+            var locked = true
+            val store =
+                object : CordnGroupStore by inner {
+                    override suspend fun loadGroup(gid: String): ByteArray? = if (locked) throw IllegalStateException("keystore not unlocked yet") else inner.loadGroup(gid)
+                }
+            val manager = CordnGroupManager(account, config, FakeCoordinator(account), store)
+
+            assertFailsWith<IllegalStateException> { manager.restore() }
+            assertTrue(manager.unrestorable.value.isEmpty(), "a store error is not an unreadable group: ${manager.unrestorable.value}")
+
+            // Once the store opens, the retry restores what reads and marks only what does not.
+            locked = false
+            manager.restore()
+            assertEquals(setOf(good), manager.gids.value)
+            assertEquals(setOf(bad), manager.unrestorable.value.keys)
+        }
 }
