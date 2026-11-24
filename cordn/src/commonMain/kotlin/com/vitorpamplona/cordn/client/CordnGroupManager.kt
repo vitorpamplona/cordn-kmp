@@ -1024,7 +1024,9 @@ class CordnGroupManager(
      * A Welcome for a group this manager already holds is skipped **and**
      * retired. That is the stale record [accept] leaves behind when its
      * acknowledgement does not reach the coordinator, and letting it pile up
-     * is what made a second drain destructive.
+     * is what made a second drain destructive. A group this account was
+     * removed from is not held: its Welcome is an invitation back in, opened
+     * like any other.
      *
      * [gidFor] overrides where the delivery id comes from — see [gidFrom] for
      * why it can be missing and what to pass when it is.
@@ -1072,7 +1074,7 @@ class CordnGroupManager(
                 skipped += SkippedWelcome(welcome.keyPackageRef, UNRESTORABLE_GROUP)
                 return@forEach
             }
-            if (groups[gid] != null) {
+            if (holdsAsMember(gid)) {
                 skipped += SkippedWelcome(welcome.keyPackageRef, ALREADY_A_MEMBER)
                 stale += ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)
                 return@forEach
@@ -1108,13 +1110,20 @@ class CordnGroupManager(
      * Installing a Welcome over a live group rolls its epoch back to the one
      * it was issued at, and MLS does not recover from that: every message
      * after the rolled-back epoch stops decrypting, silently and permanently.
+     * A group a Commit removed this account from is replaced: there is no live
+     * membership left to roll back.
      */
     suspend fun accept(welcome: OpenedWelcome): String {
         withGroup(welcome.gid) {
             requireRestorable(welcome.gid)
-            require(groups[welcome.gid] == null) { "already in a group with gid ${welcome.gid}" }
+            val removed = groups[welcome.gid]
+            require(removed == null || !removed.group.isLocalMember()) { "already in a group with gid ${welcome.gid}" }
 
             groups[welcome.gid] = Slot(welcome.group)
+            // Back in a group this account was removed from: the old membership's echo
+            // record and unopenable count say nothing about the new one. The cursor stays,
+            // so what was already read is not offered again.
+            if (removed != null) sync.restore(welcome.gid, sync.inbox(welcome.gid).cursor)
             // `after` is the inviter saying where this member's history starts.
             // Without it a joiner replays epochs from before it existed and
             // every one lands as Undecryptable.
@@ -1139,6 +1148,13 @@ class CordnGroupManager(
         retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
         spend(welcome.keyPackageRef)
     }
+
+    /**
+     * Whether this manager holds [gid] with this account still in it. A group a Commit removed
+     * us from stays held (its history is still readable here) but is no longer one a Welcome
+     * would be stale for.
+     */
+    private fun holdsAsMember(gid: String): Boolean = groups[gid]?.group?.isLocalMember() == true
 
     /** [onKeyPackageSpent], where a failure is logged and nothing more. */
     private suspend fun spend(keyPackageRef: String) {
@@ -1169,7 +1185,7 @@ class CordnGroupManager(
         // joined, and the other is stale, as any Welcome for a group already held is. One item
         // must not abort the batch.
         inbox.pending.sortedByDescending { it.epoch }.forEach { welcome ->
-            if (groups[welcome.gid] != null) {
+            if (holdsAsMember(welcome.gid)) {
                 skipped += SkippedWelcome(welcome.keyPackageRef, ALREADY_A_MEMBER)
                 retire(listOf(ConsumedWelcomeRef(welcome.keyPackageRef, welcome.at)))
                 spend(welcome.keyPackageRef)

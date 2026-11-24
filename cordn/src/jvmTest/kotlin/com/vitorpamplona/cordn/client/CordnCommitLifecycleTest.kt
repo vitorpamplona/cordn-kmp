@@ -636,4 +636,40 @@ class CordnCommitLifecycleTest {
             g.alice.updateGroupMetadata(gid) { it.copy(name = "still mine to change") }
             assertEquals("still mine to change", g.alice.name())
         }
+
+    // ---- audit 3: a removed member's slot ----------------------------------
+
+    @Test
+    fun `a member removed and invited again joins the new Welcome and keeps its KeyPackage until then`() =
+        runTest {
+            val g = aliceAndBob()
+            g.alice.removeMember(gid, bob)
+            g.bob.catchUp { }
+            assertFalse(g.bob.group(gid)!!.isLocalMember(), "bob applied his own removal")
+
+            // Invited again, with a new KeyPackage: the first one was spent on the first join.
+            g.coordinator.keyPackages.remove("bb".repeat(16))
+            val (secondBundle, secondStored) = publication(bobSigner, "b2".repeat(16))
+            g.coordinator.seedKeyPackage(secondStored)
+            g.alice.invite(gid, bob)
+            assertEquals(3L, g.alice.group(gid)!!.epoch)
+
+            val spent = mutableListOf<String>()
+            val bob2 = g.bob
+            bob2.onKeyPackageSpent = { spent += it }
+            val results = bob2.joinPendingWelcomes({ ref -> secondBundle.takeIf { ref == secondStored.keyPackageRef } })
+            assertEquals(listOf(gid), results.joined, "skipped: ${results.skipped}")
+            assertEquals(listOf(secondStored.keyPackageRef), spent)
+            assertTrue(bob2.group(gid)!!.isLocalMember())
+            assertEquals(3L, bob2.group(gid)!!.epoch)
+
+            g.alice.send(gid, "welcome back")
+            val delivered = mutableListOf<CordnGroupManager.Delivery>()
+            bob2.catchUp { delivered += it }
+            assertEquals(
+                listOf("welcome back"),
+                delivered.filterIsInstance<CordnGroupManager.Delivery.Message>().map { it.received.envelope.content },
+                "got ${delivered.map { it::class.simpleName }}",
+            )
+        }
 }
